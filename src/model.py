@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
+import numpy as np
 
 
 EPSILON = float(np.finfo(float).eps)
@@ -30,9 +31,9 @@ class ReptileModel(nn.Module):
     def is_cuda(self):
         return next(self.parameters()).is_cuda
 
-class csgoModel(reptileModel):
-    def __init__(self, num_classes):
-        super(csgoModel, self).__init__()
+class CsgoModel(ReptileModel):
+    def __init__(self):
+        super(CsgoModel, self).__init__()
         # ReptileModel.__init__(self)
         
         self.history_dim = 512
@@ -44,14 +45,14 @@ class csgoModel(reptileModel):
         self.ff_dropout_rate = 0.1
         self.rnn_dropout_rate = 0.1
         
-        self.prices = [] # TODO
+        self.prices = torch.randint(20, 500, (self.output_dim,)).cuda() # TODO
         self.start_idx = 0
         self.end_idx = 1
         #self.action_mask = torch.ones(self.output_dim).float().cuda()
         #self.action_mask[self.start_idx] = 0.0
         self.max_output_num = 10
         
-        self.embedding = None # TODO: load
+        self.embedding = torch.rand(self.output_dim, self.embedding_dim).cuda() # TODO: load
 
         #xavier_initialization
         
@@ -60,7 +61,7 @@ class csgoModel(reptileModel):
         
     def reward_fun(self, a, a_r):
         # TODO: recall
-        
+        raise NotImplementedError()
 
     def loss(self, mini_batch):
         def stablize_reward(r):
@@ -113,16 +114,32 @@ class csgoModel(reptileModel):
         return loss_dict
     
     def get_embedding(self, idx):
-        return self.embedding[idx]
+        if not isinstance(idx, list):
+            return self.embedding[idx]
+        else:
+            ret = []
+            for i in idx:
+                ret.append(self.embedding[i])
+            return ret
     
-    def encode(self, x):
+        
+    
+    def forward(self, x, money):
+        
+        def low_att(x_i):
+            hi = self.att_LN1(x_i)
+            hi = torch.tanh(hi)
+            hi = self.v1(hi)
+            att = F.softmax(hi, 0)
+            hi = torch.sum(att * x_i, 0)
+            return hi
         
         def hier_att(x_i):
             # lower-level attention
             h_i = []
             for xi in x_i:
                 hi = self.att_LN1(xi)
-                hi = F.tanh(hi)
+                hi = torch.tanh(hi)
                 hi = self.v1(hi)
                 att = F.softmax(hi, 0)
                 hi = torch.sum(att * xi, 0)
@@ -131,41 +148,11 @@ class csgoModel(reptileModel):
             
             # higher-level attention
             hi = self.att_LN2(h_i)
-            hi = F.tanh(hi)
+            hi = torch.tanh(hi)
             hi = self.v2(hi)
             att = F.softmax(hi, 0)
             hi = torch.sum(att * h_i, 0)
             
-            return hi
-        
-        
-        
-        # (self, teammate, opponent) = x
-        x_s, x_t, x_o = x
-        
-        #hs = low_att(x_s)
-        ht = hier_att(x_t)
-        ho = hier_att(x_o) # TODO: diff weight for x_o attn
-        return ht, ho
-        '''h = torch.cat([hs, ht, ho], -1)
-        
-        out = self.LN1(h)
-        out = F.relu(out)
-        out = self.LNDropout(out)
-        out = self.LN2(out)
-        out = self.LNDropout(out)
-        return out'''
-    
-        
-    
-    def forward(self, x, money):
-        
-        def low_att(x_i):
-            hi = self.att_LN1(x_i)
-            hi = F.tanh(hi)
-            hi = self.v1(hi)
-            att = F.softmax(hi, 0)
-            hi = torch.sum(att * x_i, 0)
             return hi
         
         def classif_LN(xi):
@@ -174,33 +161,28 @@ class csgoModel(reptileModel):
             out = self.LNDropout(out)
             out = self.LN2(out)
             out = self.LNDropout(out)
-            out = F.softmax(out)
+            out = F.softmax(out, dim = -1)
             #action_dist = F.softmax(
             #    torch.squeeze(A @ torch.unsqueeze(X2, 2), 2) - (1 - action_mask) * ops.HUGE_INT, dim=-1)
             return out
         
         def money_mask(money, prices):
-            return (torch.tensor(prices) <= money).float().cuda() 
+            return (prices <= money).float().cuda() 
         
         x_s, x_t, x_o = x
-        ht, ho = self.encode(x)
+        x_s = self.get_embedding(x_s)
+        x_t = self.get_embedding(x_t)
+        x_o = self.get_embedding(x_o)
+        ht = hier_att(x_t)
+        ho = hier_att(x_o)
         action_list = []
-        greedy_action = []
+        greedy_list = []
         action_prob = []
         hs = low_att(x_s)
         h = torch.cat([hs, ht, ho], -1)
         init_action = self.start_idx
         self.initialize_lstm(h, init_action)
         for i in range(self.max_output_num):
-            '''hs = low_att(xs)
-            h = torch.cat([hs, ht, ho], -1)
-            
-            out = self.LN1(h)
-            out = F.relu(out)
-            out = self.LNDropout(out)
-            out = self.LN2(out)
-            out = F.softmax(out)'''
-            
             H = self.history[-1][0][-1, :, :]
             action_dist = classif_LN(H)
             action_dist = action_dist * money_mask(money, self.prices)
@@ -210,6 +192,7 @@ class csgoModel(reptileModel):
             greedy_list.append(greedy_idx)
             action_prob.append(action_dist[action_idx])
             self.update_lstm(action_idx)
+            # TODO
             money = money - self.prices[action_idx]
             
             if action_idx == self.end_idx:
@@ -220,10 +203,10 @@ class csgoModel(reptileModel):
             
         
     
-    def initialize_lstm(self, h， init_action):
-        init_embedding = self.get_embedding(init_action).unsqueeze(1)
+    def initialize_lstm(self, h, init_action):
+        init_embedding = self.get_embedding(init_action).unsqueeze(0).unsqueeze(1)
         init_h = self.HLN(h).view(self.history_num_layers, 1, self.history_dim)
-        init_h = self.CLN(h).view(self.history_num_layers, 1, self.history_dim)
+        init_c = self.CLN(h).view(self.history_num_layers, 1, self.history_dim)
         self.history = [self.rnn(init_embedding, (init_h, init_c))[1]]
     
     def update_lstm(self, action, offset=None):
@@ -454,7 +437,8 @@ class csgoModel(reptileModel):
                             o_f.write('{}\n'.format(fn_ratio))
     
     def predict(self, prob):
-        // TODO
+        # TODO
+        raise NotImplementedError()
     
     def define_modules(self):
         # terrorist
@@ -483,6 +467,7 @@ class csgoModel(reptileModel):
                 self.HLN = self.HLN.cuda()
                 self.CLN = self.CLN.cuda()
                 self.LNDropout = self.LNDropout.cuda()
+                self.rnn = self.rnn.cuda()
     
     def initialize_modules(self):
         # xavier initialization
@@ -499,3 +484,26 @@ class csgoModel(reptileModel):
         nn.init.xavier_uniform_(self.LN2.weight)
         nn.init.xavier_uniform_(self.HLN.weight)
         nn.init.xavier_uniform_(self.CLN.weight)
+
+if __name__ == '__main__':
+    print('start')
+    model = CsgoModel()
+    print('model created')
+    # money = torch.randint(100, 1000, (10,))
+    money = torch.randint(100, 1000, (1,)).item()
+    x_s = torch.randint(2, 20, (5,)).cuda()
+    x_t = []
+    for i in range(4):
+        num_weapon = torch.randint(3, 10, (1,)).item()
+        xt = torch.randint(2, 20, (num_weapon,)).cuda()
+        x_t.append(xt)
+    x_o = []
+    for i in range(5):
+        num_weapon = torch.randint(3, 10, (1,)).item()
+        xo = torch.randint(2, 20, (num_weapon,)).cuda()
+        x_o.append(xo)
+    x = (x_s, x_t, x_o)
+    print('start_forward')
+    action_list, action_prob, greedy_list = model.forward(x, money)
+    print(action_list)
+    print(action_prob)

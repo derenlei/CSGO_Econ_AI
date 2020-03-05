@@ -18,6 +18,26 @@ def set_learning_rate(optimizer, lr):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
+def insight_learning(model_insight, optimizer, iterations, TODO):
+
+    model_insight.train()
+    for iteration in xrange(iterations):
+        # Sample minibatch
+        data, labels = # TODO
+
+        # Forward pass
+        prediction = # TODO
+
+        # Get loss
+        loss = # TODO
+
+        # Backward pass - Update fast net
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    return loss.data[0]        
+        
 def main():
     
     """
@@ -46,7 +66,8 @@ def main():
     if args.cuda:
         model.cuda()
     meta_oprimizer = torch.optim.SGD(model.parameters(), lr=args.meta_lr) # TODO: add args
-    
+    info = {}
+    state = None
     
     """
     Load checkpoint
@@ -80,12 +101,60 @@ def main():
     """
     # Create tensorboard logger
     logger = SummaryWriter(run_dir)
+    # Meta Train
     for meta_iteration in tqdm(args.start_meta_iteration, args.meta_iterations):
         # Update learning rate
         meta_lr = args.meta_lr * (1. - meta_iteration/float(args.meta_iterations))
         learning_rate_decay(meta_optimizer, meta_lr)
-        # TODO
     
+        # Clone model
+        model_insight = model.clone()
+        optimizer = get_optimizer(model_insight, state)
+
+        # Update insight model
+        loss = insight_learning(model_insight, optimizer, args.iterations, TODO) # TODO
+        state = optimizer.state_dict()  # save optimizer state
+
+        # Update slow net
+        model.point_grad_to(model_insight)
+        meta_optimizer.step()
+        
+        # Meta Evaluation
+        if meta_iteration % args.validate_every == 0:
+            print('\n\nMeta-iteration', meta_iteration)
+            print('(started at {})'.format(args.start_meta_iteration))
+            print('Meta LR', meta_lr)
+            
+            # TODO, same as train, retrieve loss and accuracy
+            
+            
+            # save log
+            info.setdefault(loss_eval, {})
+            info.setdefault(accuracy_eval, {})
+            info.setdefault(meta_lr, {})
+            info['loss'][meta_iteration] = meta_loss
+            info['accuracy'][meta_iteration] = meta_accuracy
+            info['meta_lr'][meta_iteration] = meta_lr
+            print('\n')
+            print('average metaloss', np.mean(info[loss_eval].values()))
+            print('average accuracy', np.mean(info[accuracy_eval].values()))
+            logger.add_scalar('loss', meta_loss, meta_iteration)
+            logger.add_scalar('accuracy', meta_accuracy, meta_iteration)
+            logger.add_scalar('meta_lr', meta_lr, meta_iteration)            
+            
+    if meta_iteration % args.check_every == 0 and not (args.checkpoint and meta_iteration == args.start_meta_iteration):
+        # Make a checkpoint
+        checkpoint = {
+            'meta_net': model.state_dict(),
+            'meta_optimizer': meta_optimizer.state_dict(),
+            'optimizer': state,
+            'meta_iteration': meta_iteration,
+            'info': info
+        }
+        checkpoint_path = os.path.join(check_dir, 'check-{}.pth'.format(meta_iteration))
+        torch.save(checkpoint, checkpoint_path)
+        print('Saved checkpoint to', checkpoint_path)
+            
 if __name__ == '__main__':
     main()
     
