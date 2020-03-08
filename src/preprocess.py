@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 from random import random, shuffle
@@ -25,22 +26,24 @@ def process_data(data):
     # data for each player (10 in total)
     processed_data = {} # [data, label]
 
-    prev_opponent_weapons = [[None] * 5, [None] * 5]
+    prev_opponent_weapons = {}
     default_weapons = {}
 
     for round in range(1, 31):
         if str(round) not in data:
             break
 
-        round_end_weapons = [[], []]
+        round_end_weapons = {}
 
         teams = data[str(round)]["teams"]
         for _, team in teams.items():
             players = team["players"]
             for _, player in players.items():
-                player_data = []
-                is_terrorist = int(player["team_number"]) == 2
                 player_name = player["player_name"]
+                if round == 1:
+                    processed_data[player_name] = []
+
+                is_terrorist = int(player["team_number"]) == 2
 
                 round_start = player["round_start"]
                 weapon_start = round_start["weapons"].split(',')
@@ -48,6 +51,19 @@ def process_data(data):
                 if round == 1 or round == 16:
                     default_weapons[player_name] = weapon_start
 
+                # store round_end weapons for next round data
+                round_end = player["round_end"]
+                if not round_end["weapons"]:
+                    # player is dead
+                    round_end_weapons[player_name] = default_weapons[player_name]
+                else:
+                    round_end_weapons[player_name] = weapon2index(round_end["weapons"].split(','))
+
+                if round == 1 or round == 16:
+                    continue
+
+                # round is not 1 or 16, add round data to result
+                player_data = []
                 # player's team
                 player_data.append([0 if is_terrorist else 1])
                 # player's weapons at round start
@@ -56,57 +72,50 @@ def process_data(data):
                 player_data.append([round_start["account"] / 1000])
                 # player's performance score at round start, divided by 10*round_num for normalization
                 player_data.append([player["player_score"] / (round * 10)])
-                # T vs CT score
+                # team vs opponent score
                 T, CT = data[str(round)]["TvsCT"].split("vs")
                 if is_terrorist:
                     player_data.append([int(T) / 15, int(CT) / 15])
                 else:
                     player_data.append([int(CT) / 15, int(T) / 15])
 
-                teammate_weapons = []
+                teammate_data = []
                 for _, p2 in players.items():
                     if player_name == p2["player_name"]:
                         continue
-                    teammate_weapons.append(weapon2index(p2["round_freeze_end"]["weapons"].split(',')))
-                # teammates'weapon after purchasing
-                player_data.append(teammate_weapons)
-
-                # store round_end weapons for next round data
-                round_end = player["round_end"]
-                if is_terrorist:
-                    if not round_end["weapons"]:
-                        # player is dead
-                        round_end_weapons[0].append(default_weapons[player_name])
-                    else:
-                        round_end_weapons[0].append(weapon2index(round_end["weapons"].split(',')))
-                else:
-                    if not round_end["weapons"]:
-                        # player is dead
-                        round_end_weapons[1].append(default_weapons[player_name])
-                    else:
-                        round_end_weapons[1].append(weapon2index(round_end["weapons"].split(',')))
+                    teammate_weapons = weapon2index(p2["round_freeze_end"]["weapons"].split(','))
+                    teammate_money = [p2["round_freeze_end"]["account"] / 1000]
+                    teammate_score = [p2["player_score"] / (round * 10)]
+                    # teammates' money, weapon and score after purchasing
+                    teammate_data.append([teammate_weapons, teammate_money, teammate_score])
+                
+                player_data.append(teammate_data)
                     
+                # opponets' data
+                opponents_data = []
+                for _, t2 in teams.items():
+                    for _, p2 in t2["players"].items():
+                        if int(p2["team_number"]) != player["team_number"]:
+                            opponent_money = [p2["round_start"]["account"] / 1000]
+                            opponent_score = [p2["player_score"] / (round * 10)]
+                            # teammates' money score at round start, weapons last round end
+                            opponents_data.append([prev_opponent_weapons[p2["player_name"]], opponent_money, opponent_score])
+
+                player_data.append(opponents_data)
+
                 # player's purchasing actions
                 player_label = []
                 for p in player["pickup"]:
                     player_label.append(p)
                 player_label.sort(key=lambda x: x["timestamp"])
-                player_label = [x["equip_name"] for x in player_label] # TODO
+                player_label = [x["equip_name"] for x in player_label]
                 player_label.append("End")
                 player_label = weapon2index(player_label)
+                
+                # add data to result
+                processed_data[player_name].append((player_data, player_label))
 
-                if round == 1:
-                    processed_data[player_name] = []
-                elif round != 1 and round != 16:
-                    # opponents' weapons last round
-                    if is_terrorist:
-                        player_data.append(prev_opponent_weapons[1])
-                    else:
-                        player_data.append(prev_opponent_weapons[0])
-                        
-                    processed_data[player_name].append((player_data, player_label))
-
-        prev_opponent_weapons = round_end_weapons
+        prev_opponent_weapons = copy.deepcopy(round_end_weapons)
 
     # print(w)
     return processed_data
@@ -138,8 +147,8 @@ def read_dataset(data_dir):
         else:
             for _, pd in processed_data.items():
                 test_set.append(pd)
-                with open("./res.json", 'w') as f:
-                    json.dump(pd, f, indent=4)
+                # with open("./res.json", 'w') as f:
+                #     json.dump(pd, f, indent=4)
 
     shuffle(train_set)
     shuffle(val_set)
