@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 import numpy as np
+from collections import Counter
 
 
 EPSILON = float(np.finfo(float).eps)
@@ -40,19 +41,26 @@ class CsgoModel(ReptileModel):
         self.history_num_layers = 2
         self.embedding_dim = 100
         self.ff_dim = 100
-        self.input_dim = self.ff_dim * 3
+        self.input_dim = self.ff_dim * 3 + 6
         self.output_dim = 20
         self.ff_dropout_rate = 0.1
         self.rnn_dropout_rate = 0.1
         
-        self.prices = torch.randint(20, 500, (self.output_dim,)).cuda() # TODO
-        self.start_idx = 0
-        self.end_idx = 1
-        #self.action_mask = torch.ones(self.output_dim).float().cuda()
-        #self.action_mask[self.start_idx] = 0.0
-        self.max_output_num = 10
+        self.embedding = torch.tensor(np.load('/home/derenlei/MAML/data/action_embedding.npy')).cuda()
+        self.id2name = np.load('/home/derenlei/MAML/data/action_money.npy', allow_pickle = True)
+        self.id2money = np.load('/home/derenlei/MAML/data/action_name.npy', allow_pickle = True)
+        self.id2money.dtype = int
+        print(self.id2money.dtype)
+        self.prices = torch.tensor(self.id2money).cuda()
         
-        self.embedding = torch.rand(self.output_dim, self.embedding_dim).cuda() # TODO: load
+        self.end_idx = self.embedding.size()[0] - 1
+        self.start_idx = self.end_idx
+        print(self.embedding[self.start_idx])
+        self.action_mask = torch.ones(self.output_dim).float().cuda()
+        self.action_mask[self.start_idx] = 0.0
+        self.max_output_num = 10
+        self.beam_size = 128
+        assert 1 == 0
 
         #xavier_initialization
         
@@ -60,10 +68,15 @@ class CsgoModel(ReptileModel):
         self.initialize_modules()
         
     def reward_fun(self, a, a_r):
-        # TODO: recall
-        raise NotImplementedError()
+        # F1 score
+        a_common = list((Counter(a) & Counter(a_r.cpu().numpy())).elements())
+        recall = len(a_common) / len(a_r)
+        precision = len(a_common) / len(a)
+        F1_score = 2 * precision * recall / (precision + recall + EPSILON)
+        return F1_score
+            
 
-    def loss(self, mini_batch):
+    def loss(self, predictions, labels):
         def stablize_reward(r):
             r_2D = r.view(-1, self.num_rollouts)
             if self.baseline == 'avg_reward':
@@ -76,17 +89,23 @@ class CsgoModel(ReptileModel):
             return stabled_r
 
         # TODO: batch
-        x, money, gs_actions = self.format_batch(mini_batch, num_tiles=self.num_rollouts)
+        # x, money, gs_actions = self.format_batch(mini_batch, num_tiles=self.num_rollouts)
         
-        action_list, action_prob, greedy_list = self.forward(x, money)
-        log_action_probs = torch.log(action_prob + EPSILON)
+        action_list, action_prob, greedy_list = predictions
+        log_action_probs = []
+        for ap in action_prob:
+            log_action_probs.append(torch.log(ap + EPSILON).unsqueeze(0))
+        log_action_probs = torch.cat(log_action_probs, 0)
+        # log_action_probs = torch.log(action_prob + EPSILON)
+        gs_actions = labels
 
         # Compute policy gradient loss
         # Compute discounted reward
-        final_reward = reward_fun(action_list, gs_actions) - reward_fun(greedy_action, gs_actions)
-        if self.baseline != 'n/a':
+        final_reward = self.reward_fun(action_list, gs_actions) - self.reward_fun(greedy_list, gs_actions)
+        '''if self.baseline != 'n/a':
             #print('stablized reward')
-            final_reward = stablize_reward(final_reward)
+            final_reward = stablize_reward(final_reward)'''
+        
         '''cum_discounted_rewards = [0] * self.num_rollout_steps
         cum_discounted_rewards[-1] = final_reward
         R = 0
@@ -100,7 +119,6 @@ class CsgoModel(ReptileModel):
             log_action_prob = log_action_probs[i]
             pg_loss += -cum_discounted_rewards[i] * log_action_prob
             pt_loss += -cum_discounted_rewards[i] * torch.exp(log_action_prob)'''
-        
         pg_loss = -final_reward * torch.sum(log_action_probs)
         pt_loss = -final_reward * torch.sum(torch.exp(log_action_probs))
 
@@ -122,78 +140,103 @@ class CsgoModel(ReptileModel):
                 ret.append(self.embedding[i])
             return ret
     
+    def high_att(self, x):
+        # team-level attention
+        h = self.att_LN2(x)
+        h = torch.tanh(h)
+        h = self.v2(h)
+        att = F.softmax(h, 0)
+        ret = torch.sum(att * x, 0)
+        return ret
         
+    def low_att(self, x):
+        # player-level attention
+        h = self.att_LN1(x)
+        h = torch.tanh(h)
+        h = self.v1(h)
+        att = F.softmax(h, 0)
+        ret = torch.sum(att * x, 0)
+        return ret
     
-    def forward(self, x, money):
-        
-        def low_att(x_i):
-            hi = self.att_LN1(x_i)
-            hi = torch.tanh(hi)
-            hi = self.v1(hi)
-            att = F.softmax(hi, 0)
-            hi = torch.sum(att * x_i, 0)
-            return hi
-        
-        def hier_att(x_i):
-            # lower-level attention
-            h_i = []
-            for xi in x_i:
-                hi = self.att_LN1(xi)
-                hi = torch.tanh(hi)
-                hi = self.v1(hi)
-                att = F.softmax(hi, 0)
-                hi = torch.sum(att * xi, 0)
-                h_i.append(hi.unsqueeze(0))
-            h_i = torch.cat(h_i, 0)
-            
-            # higher-level attention
-            hi = self.att_LN2(h_i)
-            hi = torch.tanh(hi)
-            hi = self.v2(hi)
-            att = F.softmax(hi, 0)
-            hi = torch.sum(att * h_i, 0)
-            
-            return hi
-        
-        def classif_LN(xi):
-            out = self.LN1(xi)
-            out = F.relu(out)
-            out = self.LNDropout(out)
-            out = self.LN2(out)
-            out = self.LNDropout(out)
-            out = F.softmax(out, dim = -1)
-            #action_dist = F.softmax(
-            #    torch.squeeze(A @ torch.unsqueeze(X2, 2), 2) - (1 - action_mask) * ops.HUGE_INT, dim=-1)
-            return out
-        
-        def money_mask(money, prices):
-            return (prices <= money).float().cuda() 
+    def classif_LN(self, x):
+        out = self.LN1(x)
+        out = F.relu(out)
+        out = self.LNDropout(out)
+        out = self.LN2(out)
+        out = self.LNDropout(out)
+        out = F.softmax(out, dim = -1)
+        #action_dist = F.softmax(
+        #    torch.squeeze(A @ torch.unsqueeze(X2, 2), 2) - (1 - action_mask) * ops.HUGE_INT, dim=-1)
+        return out
+    
+    def money_mask(self, money):
+        return (self.prices <= money).float().cuda() 
+    
+    def forward(self, x, money, performance):
+        '''
+        forward for one round
+        x: idx of weapons, x = [x_s, x_t, x_o]
+        x_s: num_weapon #(num_batch, num_shot, num_weapon)
+        x_t, x_o: (num_player, num_weapon) #(num_batch, num_shot, num_player, num_weapon)
+        '''
         
         x_s, x_t, x_o = x
+        perf_s, perf_t, perf_o = performance
+        money_s, money_t, money_o = money
         x_s = self.get_embedding(x_s)
         x_t = self.get_embedding(x_t)
         x_o = self.get_embedding(x_o)
-        ht = hier_att(x_t)
-        ho = hier_att(x_o)
+        
+        # represent allies
+        ht = []
+        for xti, perfi, moneyi in zip(x_t, perf_t, money_t):
+            hti = self.low_att(xti)
+            hti = torch.cat([hti, torch.tensor([perfi]).cuda(), torch.tensor([moneyi]).cuda()], -1)
+            ht.append(hti.unsqueeze(0))
+        ht = torch.cat(ht, 0)
+        ht = self.high_att(ht)
+        
+        # represent enemies
+        ho = []
+        for xoi, perfi, moneyi in zip(x_o, perf_o, money_o):
+            hoi = self.low_att(xoi)
+            hoi = torch.cat([hoi, torch.tensor([perfi]).cuda(), torch.tensor([moneyi]).cuda()], -1)
+            ho.append(hoi.unsqueeze(0))
+        ho = torch.cat(ho, 0)
+        ho = self.high_att(ho)
+
+        # represent self
+        hs = self.low_att(x_s)
+        hs = torch.cat([hs, torch.tensor([perf_s]).cuda(), torch.tensor([money_s]).cuda()], -1)
+        
+        # concat representations
+        h = torch.cat([hs, ht, ho], -1)
+        
+        # return values - predictions and probabilities
         action_list = []
         greedy_list = []
         action_prob = []
-        hs = low_att(x_s)
-        h = torch.cat([hs, ht, ho], -1)
+        
+        # initialize lstm
         init_action = self.start_idx
         self.initialize_lstm(h, init_action)
+        
+        # generate predictions
         for i in range(self.max_output_num):
             H = self.history[-1][0][-1, :, :]
-            action_dist = classif_LN(H)
-            action_dist = action_dist * money_mask(money, self.prices)
-            action_idx = torch.multinomial(action_dist, 1, replacement=True)
+            action_dist = self.classif_LN(H)
+            # action_mask = self.money_mask(money, self.prices) * self.action_mask
+            # is_zero = (torch.sum(r_prob_b, 1) == 0).float().unsqueeze(1)
+            action_mask = self.action_mask
+            action_dist = action_dist * action_mask + (1 - action_mask) * EPSILON
+            action_idx = torch.multinomial(action_dist, 1, replacement=True).item()
             action_list.append(action_idx)
-            greedy_idx = torch.argmax(action_dist)
+            greedy_idx = torch.argmax(action_dist).item()
             greedy_list.append(greedy_idx)
-            action_prob.append(action_dist[action_idx])
+            action_prob.append(action_dist[0][action_idx])
             self.update_lstm(action_idx)
             # TODO
-            money = money - self.prices[action_idx]
+            # money = money - self.prices[action_idx]
             
             if action_idx == self.end_idx:
                 return action_list, action_prob, greedy_list
@@ -203,10 +246,11 @@ class CsgoModel(ReptileModel):
             
         
     
-    def initialize_lstm(self, h, init_action):
+    def initialize_lstm(self, representation, init_action):
         init_embedding = self.get_embedding(init_action).unsqueeze(0).unsqueeze(1)
-        init_h = self.HLN(h).view(self.history_num_layers, 1, self.history_dim)
-        init_c = self.CLN(h).view(self.history_num_layers, 1, self.history_dim)
+        # transform representation to initialize (h, c)
+        init_h = self.HLN(representation).view(self.history_num_layers, 1, self.history_dim)
+        init_c = self.CLN(representation).view(self.history_num_layers, 1, self.history_dim)
         self.history = [self.rnn(init_embedding, (init_h, init_c))[1]]
     
     def update_lstm(self, action, offset=None):
@@ -219,17 +263,15 @@ class CsgoModel(ReptileModel):
                 else:
                     p[i] = x[offset, :]
 
-        def offset_rule_history(x, offset):
-            return x[:, offset, :]
 
         # update action history
         #if self.relation_only_in_path:
         #    action_embedding = kg.get_relation_embeddings(action[0])
         #else:
         #    action_embedding = self.get_action_embedding(action, kg)
-        embedding = self.get_embedding(action)
+        embedding = self.get_embedding(action).view(-1, 1, self.embedding_dim)
         if offset is not None:
-            offset_path_history(self.history, offset)
+            offset_path_history(self.history, offset.view(-1))
             # during inference, update batch size
             # self.hidden_tensor = offset_rule_history(self.hidden_tensor, offset)
             # self.cell_tensor = offset_rule_history(self.cell_tensor, offset)
@@ -237,7 +279,7 @@ class CsgoModel(ReptileModel):
 
         # self.path.append(self.path_encoder(action_embedding.unsqueeze(1), self.path[-1])[1])
         torch.backends.cudnn.enabled = False
-        self.history.append(self.rnn(embedding.unsqueeze(1), self.history[-1])[1])
+        self.history.append(self.rnn(embedding, self.history[-1])[1])
 
     def print_all_model_parameters(self):
         print('\nModel Parameters')
@@ -249,204 +291,117 @@ class CsgoModel(ReptileModel):
         print('--------------------------')
         print()
     
-    def run_train(self, train_data, dev_data):
-        # TODO
-        self.print_all_model_parameters()
-        
-        writer = SummaryWriter(self.board_dir)
-        
-        if self.optim is None:
-            self.optim = optim.Adam(
-                filter(lambda p: p.requires_grad, self.parameters()), lr=self.learning_rate)
-
-        # Track dev metrics changes
-        best_dev_metrics = 0
-        dev_metrics_history = []
-
-        batch_num = 0
-        for epoch_id in range(self.start_epoch, self.num_epochs):
-            print('Epoch {}'.format(epoch_id))
-            # TODO omit this for faster speed
-            # if self.rl_variation_tag.startswith('rs'):
-            #     # Reward shaping module sanity check:
-            #     #   Make sure the reward shaping module output value is in the correct range
-            #     train_scores = self.test_fn(train_data)
-            #     dev_scores = self.test_fn(dev_data)
-            #     print('Train set average fact score: {}'.format(float(train_scores.mean())))
-            #     print('Dev set average fact score: {}'.format(float(dev_scores.mean())))
-
-            # Update model parameters
-            self.train()
-            if self.rl_variation_tag.startswith('rs'):
-                self.fn.eval()
-                self.fn_kg.eval()
-                if self.model.endswith('hypere'):
-                    self.fn_secondary_kg.eval()
-            self.batch_size = self.train_batch_size
-            random.shuffle(train_data)
-            batch_losses = []
-            entropies = []
-            top_rules_hit = [] # percentage of hitting top rules
-            if self.run_analysis:
-                rewards = None
-                fns = None
-            for example_id in tqdm(range(0, len(train_data), self.batch_size)):
-
-                self.optim.zero_grad()
-
-                mini_batch = train_data[example_id:example_id + self.batch_size]
-                if len(mini_batch) < self.batch_size:
-                    continue
-                
-                #import cProfile, pstats, io
-                #from io import StringIO
-                #import time
-                #pr = cProfile.Profile()
-                #pr.enable()  # start profiling
-                    
-                loss = self.loss(mini_batch)
-                
-                
-                #s = io.StringIO()
-                #sortby = 'cumulative'
-                #ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
-                #ps.print_stats()
-                #print(s.getvalue())
-                #assert(0==1)
-                
-                
-                loss['model_loss'].backward()
-                if self.grad_norm > 0:
-                    clip_grad_norm_(self.parameters(), self.grad_norm)
-
-                
-                self.optim.step()
-
-                batch_losses.append(loss['print_loss'])
-                
-                if batch_num%10 == 0:
-                    if 'top_rule_hit' in loss.keys():
-                        writer.add_scalar('data/top_rule_hit', float(loss['top_rule_hit']), batch_num)
-                    if 'reward' in loss.keys():
-                        writer.add_scalar('data/reward', float(torch.mean(loss['reward'])), batch_num)
-                batch_num += 1
-                
-                if 'entropy' in loss:
-                    entropies.append(loss['entropy'])
-                if 'top_rule_hit' in loss:
-                    top_rules_hit.append(loss['top_rule_hit'])
-                if self.run_analysis:
-                    if rewards is None:
-                        rewards = loss['reward']
-                    else:
-                        rewards = torch.cat([rewards, loss['reward']])
-                    if fns is None:
-                        fns = loss['fn']
-                    else:
-                        fns = torch.cat([fns, loss['fn']])
-            # Check training statistics
-            stdout_msg = 'Epoch {}: average training loss = {}'.format(epoch_id, np.mean(batch_losses))
-            if entropies:
-                stdout_msg += ' entropy = {}'.format(np.mean(entropies))
-            if 'top_rule_hit' in loss:
-                stdout_msg += ' top rules percentage = {}'.format(np.mean(top_rules_hit))
-            print(stdout_msg)
-            self.save_checkpoint(checkpoint_id=epoch_id, epoch_id=epoch_id)
-            if self.run_analysis:
-                print('* Analysis: # path types seen = {}'.format(self.num_path_types))
-                num_hits = float(rewards.sum())
-                hit_ratio = num_hits / len(rewards)
-                print('* Analysis: # hits = {} ({})'.format(num_hits, hit_ratio))
-                num_fns = float(fns.sum())
-                fn_ratio = num_fns / len(fns)
-                print('* Analysis: false negative ratio = {}'.format(fn_ratio))
-
-            # Check dev set performance
-            if self.run_analysis or (epoch_id > 0 and epoch_id % self.num_peek_epochs == 0):
-                self.eval()
-                self.batch_size = self.dev_batch_size
-                dev_scores, rule_scores = self.forward(dev_data, verbose=False)
-                print('Dev set performance: (correct evaluation)')
-                hit1, hit3, hit5, hit10, mrr = src.eval.hits_and_ranks(dev_data, dev_scores, self.kg.dev_objects, verbose=True)
-                # tensorboard
-                writer.add_scalar('data/hit1_dev_correct', hit1, epoch_id)
-                writer.add_scalar('data/hit3_dev_correct', hit3, epoch_id)
-                writer.add_scalar('data/hit5_dev_correct', hit5, epoch_id)
-                writer.add_scalar('data/hit10_dev_correct', hit10, epoch_id)
-                writer.add_scalar('data/mrr_dev_correct', mrr, epoch_id)
-                if rule_scores is not None:
-                    writer.add_scalar('data/confidence_score_dev', torch.mean(rule_scores).cpu().numpy(), epoch_id)
-                
-                # metrics = mrr
-                metrics = hit1
-                if self.kg.args.pre_train:
-                    metrics = torch.mean(rule_scores).cpu().numpy()
-                if rule_scores is not None:
-                    print('average dev set rule confidence score: {}'.format(torch.mean(rule_scores).cpu().numpy()))
-                print('Dev set performance: (include test set labels)')
-                hit1, hit3, hit5, hit10, mrr = src.eval.hits_and_ranks(dev_data, dev_scores, self.kg.all_objects, verbose=True)
-                # tensorboard
-                writer.add_scalar('data/hit1_dev_test_label', hit1, epoch_id)
-                writer.add_scalar('data/hit3_dev_test_label', hit3, epoch_id)
-                writer.add_scalar('data/hit5_dev_test_label', hit5, epoch_id)
-                writer.add_scalar('data/hit10_dev_test_label', hit10, epoch_id)
-                writer.add_scalar('data/board/mrr_dev_test_label', mrr, epoch_id)
-                
-                # Action dropout anneaking
-                if self.model.startswith('point'):
-                    eta = self.action_dropout_anneal_interval
-                    if len(dev_metrics_history) > eta and metrics < min(dev_metrics_history[-eta:]):
-                        old_action_dropout_rate = self.action_dropout_rate
-                        self.action_dropout_rate *= self.action_dropout_anneal_factor
-                        print('Decreasing action dropout rate: {} -> {}'.format(
-                            old_action_dropout_rate, self.action_dropout_rate))
-                # Save checkpoint
-                if metrics > best_dev_metrics:
-                    self.save_checkpoint(checkpoint_id=epoch_id, epoch_id=epoch_id, is_best=True)
-                    best_dev_metrics = metrics
-                    with open(os.path.join(self.model_dir, 'best_dev_iteration.dat'), 'w') as o_f:
-                        o_f.write('{}'.format(epoch_id))
-                else:
-                    # Early stopping
-                    if epoch_id >= self.num_wait_epochs and metrics < np.mean(
-                            dev_metrics_history[-self.num_wait_epochs:]):
-                        break
-                dev_metrics_history.append(metrics)
-                if self.run_analysis:
-                    num_path_types_file = os.path.join(self.model_dir, 'num_path_types.dat')
-                    dev_metrics_file = os.path.join(self.model_dir, 'dev_metrics.dat')
-                    hit_ratio_file = os.path.join(self.model_dir, 'hit_ratio.dat')
-                    fn_ratio_file = os.path.join(self.model_dir, 'fn_ratio.dat')
-                    if epoch_id == 0:
-                        with open(num_path_types_file, 'w') as o_f:
-                            o_f.write('{}\n'.format(self.num_path_types))
-                        with open(dev_metrics_file, 'w') as o_f:
-                            o_f.write('{}\n'.format(metrics))
-                        with open(hit_ratio_file, 'w') as o_f:
-                            o_f.write('{}\n'.format(hit_ratio))
-                        with open(fn_ratio_file, 'w') as o_f:
-                            o_f.write('{}\n'.format(fn_ratio))
-                    else:
-                        with open(num_path_types_file, 'a') as o_f:
-                            o_f.write('{}\n'.format(self.num_path_types))
-                        with open(dev_metrics_file, 'a') as o_f:
-                            o_f.write('{}\n'.format(metrics))
-                        with open(hit_ratio_file, 'a') as o_f:
-                            o_f.write('{}\n'.format(hit_ratio))
-                        with open(fn_ratio_file, 'a') as o_f:
-                            o_f.write('{}\n'.format(fn_ratio))
     
-    def predict(self, prob):
-        # TODO
-        raise NotImplementedError()
+    def predict(self, x, money, performance):
+        '''
+        x: input
+        '''
+        '''
+        forward for one round
+        x: idx of weapons, x = [x_s, x_t, x_o]
+        x_s: num_weapon #(num_batch, num_shot, num_weapon)
+        x_t, x_o: (num_player, num_weapon) #(num_batch, num_shot, num_player, num_weapon)
+        '''
+        
+        x_s, x_t, x_o = x
+        perf_s, perf_t, perf_o = performance
+        money_s, money_t, money_o = money
+        x_s = self.get_embedding(x_s)
+        x_t = self.get_embedding(x_t)
+        x_o = self.get_embedding(x_o)
+        
+        # represent allies
+        ht = []
+        for xti, perfi, moneyi in zip(x_t, perf_t, money_t):
+            hti = self.low_att(xti)
+            hti = torch.cat([hti, torch.tensor([perfi]).cuda(), torch.tensor([moneyi]).cuda()], -1)
+            ht.append(hti.unsqueeze(0))
+        ht = torch.cat(ht, 0)
+        ht = self.high_att(ht)
+        
+        # represent enemies
+        ho = []
+        for xoi, perfi, moneyi in zip(x_o, perf_o, money_o):
+            hoi = self.low_att(xoi)
+            hoi = torch.cat([hoi, torch.tensor([perfi]).cuda(), torch.tensor([moneyi]).cuda()], -1)
+            ho.append(hoi.unsqueeze(0))
+        ho = torch.cat(ho, 0)
+        ho = self.high_att(ho)
+
+        # represent self
+        hs = self.low_att(x_s)
+        hs = torch.cat([hs, torch.tensor([perf_s]).cuda(), torch.tensor([money_s]).cuda()], -1)
+        
+        # concat representations
+        h = torch.cat([hs, ht, ho], -1)
+        
+        # return values - predictions and probabilities
+        action_list = []
+        action_prob = []
+        
+        # initialize lstm
+        init_action = self.start_idx
+        self.initialize_lstm(h, init_action)
+        
+        log_action_prob = torch.zeros(1).cuda()
+        finished = torch.zeros(1).cuda()
+        
+        action_list = torch.tensor([self.start_idx]).unsqueeze(0).cuda()
+        money_s = torch.tensor([money_s]).cuda()
+        
+        # generate predictions
+        for i in range(self.max_output_num):
+            H = self.history[-1][0][-1, :, :]
+            action_dist = self.classif_LN(H)
+            action_mask = self.money_mask(money_s.view(-1, 1)) * self.action_mask
+            # is_zero = (torch.sum(r_prob_b, 1) == 0).float().unsqueeze(1)
+            action_mask = self.action_mask
+            action_dist = action_dist * action_mask + (1 - action_mask) * EPSILON
+            end_mask = torch.zeros(self.output_dim).cuda()
+            end_mask[self.end_idx] = 1.0
+            action_dist = action_dist * (1 - finished).view(-1, 1) + finished.view(-1, 1) * end_mask
+            
+            
+            log_action_dist = log_action_prob.view(-1, 1) + torch.log(action_dist + EPSILON)
+            assert log_action_dist.size()[1] == self.output_dim
+            last_k = len(log_action_dist)
+            log_action_dist = log_action_dist.view(1, -1)
+            
+            k = min(self.beam_size, log_action_dist.size()[1])
+            log_action_prob, action_ind = torch.topk(log_action_dist, k)
+            action_idx = action_ind % self.output_dim
+            action_offset = action_ind / self.output_dim
+            action_list = torch.cat([action_list[action_offset].view(k, -1), action_idx.view(-1, 1)], 1)
+            print(action_list[0])
+            
+            self.update_lstm(action_idx, offset = action_offset)
+            # TODO
+            money_s = money_s[action_offset].view(k)
+            money_s = money_s - self.prices[action_idx].view(-1)
+            
+            finished = (action_idx == self.end_idx).float()
+            if action_idx.view(-1)[0].item() == self.end_idx:
+                break
+            # xs = torch.cat([xs.unsqueeze(0), self.get_embedding(out_id).unsqueeze(0)], 0)
+        
+        pred = action_list[0][1:]
+        print(action_list)
+        print(pred)
+        actions = []
+        for elem in pred:
+            actions.append(elem)
+            if elem == self.end_idx:
+                break
+        return actions, log_action_prob
+        
     
     def define_modules(self):
         # terrorist
         #self.LN1 = nn.Linear(self.embedding_dim, self.ff_dim)
         self.att_LN1 = nn.Linear(self.embedding_dim, self.ff_dim)
         self.v1 = nn.Linear(self.ff_dim, 1)
-        self.att_LN2 = nn.Linear(self.ff_dim, self.ff_dim)
-        self.v2 = nn. Linear(self.ff_dim, 1)
+        self.att_LN2 = nn.Linear(self.ff_dim + 2, self.ff_dim + 2)
+        self.v2 = nn. Linear(self.ff_dim + 2, 1)
         self.HLN = nn.Linear(self.input_dim, self.history_dim * self.history_num_layers)
         self.CLN = nn.Linear(self.input_dim, self.history_dim * self.history_num_layers)
         self.LN1 = nn.Linear(self.history_dim, self.ff_dim)
@@ -490,7 +445,16 @@ if __name__ == '__main__':
     model = CsgoModel()
     print('model created')
     # money = torch.randint(100, 1000, (10,))
-    money = torch.randint(100, 1000, (1,)).item()
+    money_s = torch.randint(100, 1000, (1,)).float().item()
+    money_t = torch.randint(100, 1000, (4,)).float()
+    money_o = torch.randint(100, 1000, (5,)).float()
+    money = (money_s, money_t, money_o)
+    
+    perf_s = torch.randint(0, 5, (1,)).float().item()
+    perf_t = torch.randint(0, 5, (4,)).float()
+    perf_o = torch.randint(0, 5, (5,)).float()
+    perf = (perf_s, perf_t, perf_o)
+    
     x_s = torch.randint(2, 20, (5,)).cuda()
     x_t = []
     for i in range(4):
@@ -504,6 +468,16 @@ if __name__ == '__main__':
         x_o.append(xo)
     x = (x_s, x_t, x_o)
     print('start_forward')
-    action_list, action_prob, greedy_list = model.forward(x, money)
+    action_list, action_prob, greedy_list = model.forward(x, money, perf)
+    print(action_list)
+    print(action_prob)
+    labels = torch.randint(2, 20, (torch.randint(3, 10, (1,)).item(),))
+    labels[-1] = 1
+    print(labels)
+    print('loss')
+    loss_dict = model.loss((action_list, action_prob, greedy_list), labels)
+    print(loss_dict)
+    print('prediction')
+    action_list, action_prob = model.predict(x, money, perf)
     print(action_list)
     print(action_prob)

@@ -9,6 +9,7 @@ from MAML.src.preprocess import read_dataset
 from MAML.src.model import CsgoModel
 
 from MAML.src.utils import find_latest_file
+from MAML.src.utils import get_accuracy
 
 from tensorboardX import SummaryWriter
 
@@ -17,7 +18,10 @@ DATA_DIR = 'data/'
 def set_learning_rate(optimizer, lr):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-    
+        
+        
+        
+        
 def evaluation(model, optimizer, k_shot, val_set):
     losses = []
     accuracies = []
@@ -110,9 +114,10 @@ def main():
     # Parsing
     parser = argparse.ArgumentParser('Train MAML on CSGO')
     # params
-    parser.add_argument('logdir', help='Folder to store everything/load')
+    parser.add_argument('--logdir', default='log/', type=str, help='Folder to store everything/load')
     parser.add_argument('--player_mode', default='terrorist', type=str, help='terrorist or counter_terrorist')
     parser.add_argument('--shots', default=5, type=int, help='shots per class (K-shot)')
+    parser.add_argument('--start_meta_iteration', default=0, type=int, help='start number of meta iterations')
     parser.add_argument('--meta_iterations', default=100, type=int, help='number of meta iterations')
     parser.add_argument('--meta_lr', default=1., type=float, help='meta learning rate')
     parser.add_argument('--lr', default=1e-3, type=float, help='base learning rate')
@@ -129,13 +134,12 @@ def main():
     Load data and construct model
     """
     random.seed(args.seed)
-    train_set, val_set, test_set = read_dataset(DATA_DIR, args.player_mode) # TODO: implement DATA_DIR
+    train_set, val_set, test_set = read_dataset(DATA_DIR) # TODO: implement DATA_DIR
     # build model, optimizer
     model = CsgoModel() # TODO: add args
     if args.cuda:
         model.cuda()
     meta_optimizer = torch.optim.SGD(model.parameters(), lr=args.meta_lr) # TODO: add args
-    info = {}
     state = None
     
     """
