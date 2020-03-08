@@ -1,5 +1,6 @@
 import copy
 import json
+import numpy as np
 import os
 from random import random, shuffle
 
@@ -68,7 +69,7 @@ def process_data(data):
 
                 # round is not 1 or 16, add round data to result only if data is valid
                 player_data = []
-                # player's team
+                # player's team, 0 for terrorist and i for terrorist
                 player_data.append([0 if is_terrorist else 1])
                 # player's weapons at round start
                 player_data.append(weapon_start)
@@ -158,12 +159,10 @@ def read_dataset(data_dir):
     with open("./data/weapon_index.json") as f:
         weapon_index_dict = json.load(f)
 
-    for file in os.listdir(data_dir):
-        # print(file)
-        with open("./data/0-299-new/" + file) as f:
-            data = json.load(f)
+    data = np.load(data_dir)
 
-        processed_data = process_data(data) # len == 10
+    for match in data:
+        processed_data = process_data(match) # len == 10
         if processed_data is None:
             continue
 
