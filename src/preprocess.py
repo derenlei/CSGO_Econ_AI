@@ -30,6 +30,7 @@ def process_data(data):
     default_weapons = {}
 
     for round in range(1, 31):
+        # print(round)
         if str(round) not in data:
             break
 
@@ -43,6 +44,9 @@ def process_data(data):
                 if round == 1:
                     processed_data[player_name] = []
 
+                if player["team_number"] is None:
+                    return None
+
                 is_terrorist = int(player["team_number"]) == 2
 
                 round_start = player["round_start"]
@@ -53,7 +57,7 @@ def process_data(data):
 
                 # store round_end weapons for next round data
                 round_end = player["round_end"]
-                if not round_end["weapons"]:
+                if round_end["weapons"] is None:
                     # player is dead
                     round_end_weapons[player_name] = default_weapons[player_name]
                 else:
@@ -62,17 +66,21 @@ def process_data(data):
                 if round == 1 or round == 16:
                     continue
 
-                # round is not 1 or 16, add round data to result
+                # round is not 1 or 16, add round data to result only if data is valid
                 player_data = []
                 # player's team
                 player_data.append([0 if is_terrorist else 1])
                 # player's weapons at round start
                 player_data.append(weapon_start)
                 # player's money at round start, divided by 1k for normalization
-                player_data.append([round_start["account"] / 1000])
+                player_data.append([int(round_start["account"]) / 1000])
                 # player's performance score at round start, divided by 10*round_num for normalization
-                player_data.append([player["player_score"] / (round * 10)])
+                player_data.append([int(round_start["player_score"]) / (round * 10)])
                 # team vs opponent score
+                if data[str(round)]["TvsCT"] is None:
+                    # data anomaly 
+                    continue
+
                 T, CT = data[str(round)]["TvsCT"].split("vs")
                 if is_terrorist:
                     player_data.append([int(T) / 15, int(CT) / 15])
@@ -80,27 +88,48 @@ def process_data(data):
                     player_data.append([int(CT) / 15, int(T) / 15])
 
                 teammate_data = []
+                valid = True
                 for _, p2 in players.items():
                     if player_name == p2["player_name"]:
                         continue
+
+                    if p2["round_freeze_end"]["weapons"] is None:
+                        # data anomaly 
+                        valid = False
+                        break
+                        
                     teammate_weapons = weapon2index(p2["round_freeze_end"]["weapons"].split(','))
-                    teammate_money = [p2["round_freeze_end"]["account"] / 1000]
-                    teammate_score = [p2["player_score"] / (round * 10)]
+                    teammate_money = [int(p2["round_freeze_end"]["account"]) / 1000]
+                    if p2["round_start"]["player_score"] is None:
+                        # data anomaly 
+                        valid = False
+                        break
+                        
+                    teammate_score = [int(p2["round_start"]["player_score"]) / (round * 10)]
                     # teammates' money, weapon and score after purchasing
                     teammate_data.append([teammate_weapons, teammate_money, teammate_score])
                 
+                if not valid:
+                    continue
                 player_data.append(teammate_data)
                     
                 # opponets' data
+                valid = True
                 opponents_data = []
                 for _, t2 in teams.items():
                     for _, p2 in t2["players"].items():
-                        if int(p2["team_number"]) != player["team_number"]:
-                            opponent_money = [p2["round_start"]["account"] / 1000]
-                            opponent_score = [p2["player_score"] / (round * 10)]
+                        if p2["team_number"] is None:
+                            valid = False
+                            break
+
+                        if int(p2["team_number"]) != int(player["team_number"]):
+                            opponent_money = [int(p2["round_start"]["account"]) / 1000]
+                            opponent_score = [int(p2["round_start"]["player_score"]) / (round * 10)]
                             # teammates' money score at round start, weapons last round end
                             opponents_data.append([prev_opponent_weapons[p2["player_name"]], opponent_money, opponent_score])
 
+                if not valid:
+                    continue
                 player_data.append(opponents_data)
 
                 # player's purchasing actions
@@ -130,11 +159,13 @@ def read_dataset(data_dir):
         weapon_index_dict = json.load(f)
 
     for file in os.listdir(data_dir):
-        print(file)
-        with open("./data/0-40/" + file) as f:
+        # print(file)
+        with open("./data/0-299-new/" + file) as f:
             data = json.load(f)
 
         processed_data = process_data(data) # len == 10
+        if processed_data is None:
+            continue
 
         # TODO: set random seed
         rand = random()
