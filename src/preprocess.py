@@ -88,7 +88,7 @@ def process_data(data):
 
                 # round is not 1 or 16, add round data to result only if data is valid
                 player_data = []
-                # player's team, 0 for terrorist and i for terrorist
+                # player's team, 0 for terrorist and 1 for counter terrorist
                 player_data.append([0 if is_terrorist else 1])
                 # player's weapons at round start
                 player_data.append(weapon_start)
