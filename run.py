@@ -161,7 +161,7 @@ def main():
     args = parser.parse_args()
     print(args)
     #run_dir = args.logdir
-    check_dir = args.logdir + '/checkpoint/' + args.statedir # os.path.join(run_dir, 'checkpoint')
+    check_dir = args.logdir + 'checkpoint/' + args.statedir # os.path.join(run_dir, 'checkpoint')
     
     """
     Load data and construct model
@@ -181,11 +181,14 @@ def main():
     Load checkpoint
     """
     # checkpoint is directory -> Find last model or '' if does not exist
-    if os.path.isdir(args.checkpoint): # TODO: add args
+    print('check_dir', check_dir)
+    if os.path.isdir(check_dir): # TODO: add args
         latest_checkpoint = find_latest_file(check_dir)
         if latest_checkpoint:
             print('Latest checkpoint found:', latest_checkpoint)
             args.checkpoint = os.path.join(check_dir, latest_checkpoint)
+        else:
+            args.checkpoint = ''
     else:
         args.checkpoint = ''
     # Start fresh
@@ -208,7 +211,7 @@ def main():
     Meta learner loop
     """
     # Create tensorboard logger
-    logger = SummaryWriter(args.logdir + '/board/' + args.statedir)
+    logger = SummaryWriter(args.logdir + 'board/' + args.statedir)
     
     early_stopping_counter = 0
     prev_val_acc = 0
@@ -252,8 +255,8 @@ def main():
         # info['meta_lr'][meta_iteration] = meta_lr
         
         if meta_iteration % 100 == 0:
-            logger.add_scalar('loss', sum(loss)/(len(loss)*1.0), meta_iteration)
-            logger.add_scalar('accuracy', sum(accuracy)/(len(accuracy)*1.0), meta_iteration)
+            logger.add_scalar('loss', sum(train_loss)/(len(train_loss)*1.0), meta_iteration)
+            logger.add_scalar('accuracy', sum(train_accuracy)/(len(train_accuracy)*1.0), meta_iteration)
             logger.add_scalar('meta_lr', meta_lr, meta_iteration)
             train_loss, train_accuracy = [], []
    
@@ -295,7 +298,7 @@ def main():
             info.setdefault('loss', {})
             info.setdefault('accuracy', {})
             info.setdefault('meta_lr', {})
-            info['loss'][meta_iteration] = loss.detach().item()
+            info['loss'][meta_iteration] = loss#.detach().item()
             info['accuracy'][meta_iteration] = accuracy
             info['meta_lr'][meta_iteration] = meta_lr
             

@@ -187,7 +187,7 @@ def read_dataset(data_dir):
     processed_dir = data_dir[:-4] + "p.npy"
     # print(processed_dir)
     if os.path.exists(processed_dir):
-        dataset = np.load(processed_dir)
+        dataset = np.load(processed_dir, allow_pickle=True)
         train_set, val_set, test_set = dataset
 
         print("train set: ", len(train_set), end=" ")
