@@ -97,7 +97,7 @@ def process_data(data):
                 # player's performance score at round start, divided by 10*round_num for normalization
                 player_data.append([int(round_start["player_score"]) / (round * 10)])
                 # team vs opponent score
-                if data[str(round)]["TvsCT"] is None:
+                if data[str(round)]["TvsCT"] is None or not isinstance(data[str(round)]["TvsCT"], str):
                     # data anomaly 
                     continue
 
@@ -163,7 +163,13 @@ def process_data(data):
                 # player's purchasing actions
                 player_label = []
                 for p in player["pickup"]:
-                    player_label.append(p)
+                    if p["possibly_get_from"] is None:
+                        # currently only consider purchase, no pickup
+                        player_label.append(p)
+                if len(player_label) > 10:
+                    # might be a noisy data
+                    continue
+
                 player_label.sort(key=lambda x: x["timestamp"])
                 player_label = [x["equip_name"] for x in player_label]
                 player_label.append("End")
@@ -177,6 +183,19 @@ def process_data(data):
     return processed_data
 
 def read_dataset(data_dir):
+    # print(data_dir)
+    processed_dir = data_dir[:-4] + "p.npy"
+    # print(processed_dir)
+    if os.path.exists(processed_dir):
+        dataset = np.load(processed_dir)
+        train_set, val_set, test_set = dataset
+
+        print("train set: ", len(train_set), end=" ")
+        print("val set: ", len(val_set), end=" ")
+        print("test set: ", len(test_set))
+
+        return train_set, val_set, test_set
+
     global weapon_index_dict
     with open("./data/weapon_index.json") as f:
         weapon_index_dict = json.load(f)
@@ -216,7 +235,9 @@ def read_dataset(data_dir):
 
     # global w
     # print(w)
-    with open('./res.json', 'w') as f:
-        json.dump(train_set[0], f, indent=4)
+    # with open('./res.json', 'w') as f:
+    #     json.dump(train_set[0], f, indent=4)
+
+    np.save(processed_dir, (train_set, val_set, test_set))
 
     return train_set, val_set, test_set
