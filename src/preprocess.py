@@ -2,7 +2,7 @@ import copy
 import json
 import numpy as np
 import os
-from random import random, shuffle
+import random
 
 RATIO1 = 0.8
 RATIO2 = 0.9
@@ -18,8 +18,12 @@ def weapon2index(weapon_list):
     for weapon in weapon_list:
         if weapon in weapon_index_dict:
             res.append(weapon_index_dict[weapon])
-        # else:
-        #     w.add(weapon)
+        else:
+            if weapon == "Five-Seven":
+                # a misspelled word
+                res.append(weapon_index_dict["Five-SeveN"])
+            # else:
+            #     w.add(weapon)
     
     return res
 
@@ -52,6 +56,13 @@ def process_data(data):
 
                 round_start = player["round_start"]
                 weapon_start = round_start["weapons"].split(',')
+                if round_start["has_defuser"]:
+                    weapon_start.append("defuser")
+                if round_start["armor"] > 0:
+                    if round_start["has_helmet"]:
+                        weapon_start.append("vesthelm")
+                    else:
+                        weapon_start.append("vest")
                 weapon_start = weapon2index(weapon_start)
                 if round == 1 or round == 16:
                     default_weapons[player_name] = weapon_start
@@ -62,7 +73,15 @@ def process_data(data):
                     # player is dead
                     round_end_weapons[player_name] = default_weapons[player_name]
                 else:
-                    round_end_weapons[player_name] = weapon2index(round_end["weapons"].split(','))
+                    weapon_end = round_end["weapons"].split(',')
+                    if round_end["has_defuser"]:
+                        weapon_end.append("defuser")
+                    if round_end["armor"] > 0:
+                        if round_end["has_helmet"]:
+                            weapon_end.append("vesthelm")
+                        else:
+                            weapon_end.append("vest")
+                    round_end_weapons[player_name] = weapon2index(weapon_end)
 
                 if round == 1 or round == 16:
                     continue
@@ -99,7 +118,15 @@ def process_data(data):
                         valid = False
                         break
                         
-                    teammate_weapons = weapon2index(p2["round_freeze_end"]["weapons"].split(','))
+                    weapon_freeze_end = p2["round_freeze_end"]["weapons"].split(',')
+                    if p2["round_freeze_end"]["has_defuser"]:
+                        weapon_freeze_end.append("defuser")
+                    if p2["round_freeze_end"]["armor"] > 0:
+                        if p2["round_freeze_end"]["has_helmet"]:
+                            weapon_freeze_end.append("vesthelm")
+                        else:
+                            weapon_freeze_end.append("vest")
+                    teammate_weapons = weapon2index(weapon_freeze_end)
                     teammate_money = [int(p2["round_freeze_end"]["account"]) / 1000]
                     if p2["round_start"]["player_score"] is None:
                         # data anomaly 
@@ -147,45 +174,49 @@ def process_data(data):
 
         prev_opponent_weapons = copy.deepcopy(round_end_weapons)
 
-    # print(w)
     return processed_data
 
 def read_dataset(data_dir):
-    train_set = []
-    val_set = []
-    test_set = []
-
     global weapon_index_dict
     with open("./data/weapon_index.json") as f:
         weapon_index_dict = json.load(f)
 
     data = np.load(data_dir)
 
+    processed_data = []
     for match in data:
-        processed_data = process_data(match) # len == 10
-        if processed_data is None:
+        match_data = process_data(match) # len == 10
+        if match_data is None:
             continue
 
-        # TODO: set random seed
-        rand = random()
-        if 0 <= rand < RATIO1:
-            for _, pd in processed_data.items():
-                train_set.append(pd)
-        elif RATIO1 <= rand < RATIO2:
-            for _, pd in processed_data.items():
-                val_set.append(pd)
-        else:
-            for _, pd in processed_data.items():
-                test_set.append(pd)
-                # with open("./res.json", 'w') as f:
-                #     json.dump(pd, f, indent=4)
+        processed_data.append(match_data)
 
-    shuffle(train_set)
-    shuffle(val_set)
-    shuffle(test_set)
+    random.seed(4164)
+    random.shuffle(processed_data)
+
+    train_set = []
+    val_set = []
+    test_set = []
+
+    total = len(processed_data)
+    for i, match_data in enumerate(processed_data):
+        if 0 <= i < int(RATIO1 * total):
+            for _, md in match_data.items():
+                train_set.append(md)
+        elif int(RATIO1 * total) <= i < int(RATIO2 * total):
+            for _, md in match_data.items():
+                val_set.append(md)
+        else:
+            for _, md in match_data.items():
+                test_set.append(md)
 
     print("train set: ", len(train_set), end=" ")
     print("val set: ", len(val_set), end=" ")
     print("test set: ", len(test_set))
+
+    # global w
+    # print(w)
+    with open('./res.json', 'w') as f:
+        json.dump(train_set[0], f, indent=4)
 
     return train_set, val_set, test_set
