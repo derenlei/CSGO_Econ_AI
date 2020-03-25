@@ -4,7 +4,8 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 import numpy as np
 from collections import Counter
-
+import src.utils as utils
+import time
 
 import argparse
 
@@ -12,6 +13,15 @@ import argparse
 EPSILON = float(np.finfo(float).eps)
 HUGE_INT = 1e31
 
+debug_loss = []
+debug_loss_grad = None
+last_weight = None
+last_log_prob = None
+last_weight_grad = None
+
+action_dist_debug1 = None
+action_dist_debug2 = None
+action_dist_debug3 = None
 
 class ReptileModel(nn.Module):
 
@@ -36,25 +46,73 @@ class ReptileModel(nn.Module):
         return next(self.parameters()).is_cuda
 
 class CsgoModel(ReptileModel):
-    def __init__(self, args):
+    def __init__(self, args, npy_dict):
         super(CsgoModel, self).__init__()
         # ReptileModel.__init__(self)
         self.args = args
-        self.embedding = torch.tensor(np.load(args.action_embedding)).cuda().float()
-        self.id2name = list(np.load(args.action_name, allow_pickle = True))
-        self.id2money = list(np.load(args.action_money, allow_pickle = True))
-        self.prices = torch.tensor(self.id2money).cuda()
-        self.money_scaling = args.money_scaling
-        self.end_idx = self.embedding.size()[0] - 1
-        self.start_idx = self.end_idx
+        self.embedding = torch.tensor(npy_dict["action_embedding"]).cuda().float()
+        self.id2name = list(npy_dict["action_name"])
+        self.id2money = list(npy_dict["action_money"])
+        self.prices = torch.tensor(self.id2money).float().cuda()
+        self.action_capacity = list(npy_dict["action_capacity"])
+        self.type_capacity = list(npy_dict["type_capacity"])
+        self.id2type = npy_dict["id2type"]
+        self.typeid2name = list(npy_dict["typeid2name"])
+        
         self.embedding_dim = self.embedding.size()[1]
         self.output_dim = self.embedding.size()[0]
-        self.action_mask = torch.ones(self.output_dim).float().cuda()
+        
+        self.end_idx = self.embedding.size()[0] - 1
+        self.start_idx = self.end_idx
+        self.action_capacity[self.end_idx] = HUGE_INT
+        self.type_capacity[self.id2type[self.end_idx]] = HUGE_INT
+        
+        self.mute_action_mask = 1.0 - torch.eye(len(self.id2type)).cuda()
+        self.mute_type_mask = torch.ones(len(self.typeid2name), len(self.id2type)).float().cuda()
+        for i, typeid in enumerate(self.id2type):
+            self.mute_type_mask[typeid][i] = 0.0
+        self.output_categories = 3
+        
+        
+        self.category_offset = [0, int((self.id2type<=5).sum()), int((self.id2type<=6).sum())]
+        self.category_action_offset = []
+        self.output_dim1 = self.category_offset[1] + 1
+        self.output_dim2 = self.category_offset[2] - self.category_offset[1] + 1
+        self.output_dim3 = self.output_dim - self.category_offset[2]
+        #self.output_dims = [self.output_dim1, self.output_dim2, self.output_dim3]
+        assert self.output_dim == self.output_dim1 + self.output_dim2 + self.output_dim3 - 2
+        self.category_action_offset.append(list(np.arange(self.output_dim1 - 1)) + [self.end_idx])
+        self.category_action_offset.append(list(np.arange(self.output_dim2 - 1) + self.category_offset[1]) + [self.end_idx])
+        self.category_action_offset.append(list(np.arange(self.output_dim3) + self.category_offset[2]))
+        
+        
+        # all actions in all lstm output list
+        '''self.category_mask = torch.zeros(self.output_categories, len(self.id2type)).float().cuda()
+        for i, typeid in enumerate(self.id2type):
+            if typeid == 0:
+                self.category_mask[0][i] = 1.0
+            elif 1 <= typeid <= 5:
+                self.category_mask[0][i] = 1.0
+            elif typeid == 6:
+                self.category_mask[1][i] = 1.0
+            else:
+                self.category_mask[2][i] = 1.0
+        # do not mask end token for every category
+        self.category_mask[0][self.end_idx] = 1.0
+        self.category_mask[1][self.end_idx] = 1.0
+        self.category_mask[2][self.end_idx] = 1.0
+        #self.category_mask[3][self.end_idx] = 1.0'''
+        
+        self.money_scaling = args.money_scaling
+        
+        # self.action_mask = torch.ones(self.output_dim).float().cuda()
         # self.action_mask[self.start_idx] = 0.0
-        side_mask = np.load(args.side_mask)
-        self.side_mask = dict()
-        self.side_mask[0] = torch.tensor(side_mask['t_mask'].astype(float)).cuda()
-        self.side_mask[1] = torch.tensor(side_mask['ct_mask'].astype(float)).cuda()
+        side_mask = npy_dict["side_mask"]
+        self.side_mask = []
+        self.side_mask.append(torch.tensor(side_mask['t_mask'].astype(float)).cuda().unsqueeze(0))
+        self.side_mask.append(torch.tensor(side_mask['ct_mask'].astype(float)).cuda().unsqueeze(0))
+        self.side_mask = torch.cat(self.side_mask, 0)
+        
         self.side_embedding = torch.tensor([[1, 0], [0, 1]]).cuda().float()
         self.history_dim = args.history_dim
         self.history_num_layers = args.history_num_layers
@@ -66,6 +124,7 @@ class CsgoModel(ReptileModel):
         self.ff_dropout_rate = args.ff_dropout_rate
         self.max_output_num = args.max_output_num
         self.beam_size = args.beam_size
+        self.shared_attention_weight = args.shared_attention_weight
 
         self.define_modules()
         #xavier_initialization
@@ -80,18 +139,27 @@ class CsgoModel(ReptileModel):
         else:
             a_new = a'''
         a_new = a
-        a_r_new = a_r[: -1]
+        a_r_new = a_r
         # both are empty
         if len(a_new) == 0 and len(a_r_new) == 0:
             return 1.0
         a_common = list((Counter(a_new) & Counter(a_r_new)).elements())
-        recall = len(a_common) / (len(a_r) + EPSILON)
-        precision = len(a_common) / (len(a) + EPSILON)
+        
+        # weighting using prices
+        '''tp = torch.sum(self.prices[a_common])
+        recall = tp / (torch.sum(self.prices[a_r_new]) + EPSILON)
+        precision = tp / (torch.sum(self.prices[a_new]) + EPSILON)'''
+        
+        # unweighted
+        recall = len(a_common) / (len(a_r_new) + EPSILON)
+        precision = len(a_common) / (len(a_new) + EPSILON)
+        
         F1_score = 2 * precision * recall / (precision + recall + EPSILON)
         return F1_score
             
 
     def loss(self, predictions, labels):
+        #global debug_loss, last_log_prob
         def stablize_reward(r):
             r_2D = r.view(-1, self.num_rollouts)
             if self.baseline == 'avg_reward':
@@ -106,17 +174,39 @@ class CsgoModel(ReptileModel):
         # TODO: batch
         # x, money, gs_actions = self.format_batch(mini_batch, num_tiles=self.num_rollouts)
         
-        action_list, action_prob, greedy_list = predictions
-        log_action_probs = []
+        action_list, greedy_list, action_prob_by_category, no_output_bi, bi_prob, action_list_by_category, greedy_list_by_category = predictions
+        
+#         loss_start_time = time.time()
+        
+        batch_size = len(action_list)
+        
+        no_output_bi = torch.tensor(no_output_bi).cuda()
+
+        '''log_action_probs = []
         for ap in action_prob:
-            log_action_probs.append(torch.log(ap + EPSILON).unsqueeze(0))
-        log_action_probs = torch.cat(log_action_probs, 0)
-        # log_action_probs = torch.log(action_prob + EPSILON)
-        gs_actions = labels
+            log_action_probs.append(torch.log(ap).unsqueeze(0))
+        # all the gates are closed
+        if len(log_action_probs) == 0:
+            log_action_probs = torch.zeros(1).double().cuda()
+        else:
+            log_action_probs = torch.cat(log_action_probs, 0)'''
+        
+        '''log_bi_probs = []
+        for bp in bi_prob:
+            log_bi_probs.append(torch.log(bp).unsqueeze(0))
+        log_bi_probs = torch.cat(log_bi_probs, 0)'''
+        log_bi_probs = torch.log(bi_prob)
+        
+        #gs_actions = labels
+        #bi_labels = torch.tensor(utils.get_category_label(labels, self.id2type)).cuda().float()
+        bi_labels = torch.tensor(utils.get_batched_category_label(labels, self.id2type)).cuda().float()
+        
+#         cat_time = time.time()
+#         print(cat_time - loss_start_time)
 
         # Compute policy gradient loss
         # Compute discounted reward
-        final_reward = self.reward_fun(action_list, gs_actions) - self.reward_fun(greedy_list, gs_actions)
+        #final_reward = self.reward_fun(action_list, gs_actions) - self.reward_fun(greedy_list, gs_actions)
         '''if self.baseline != 'n/a':
             #print('stablized reward')
             final_reward = stablize_reward(final_reward)'''
@@ -134,16 +224,103 @@ class CsgoModel(ReptileModel):
             log_action_prob = log_action_probs[i]
             pg_loss += -cum_discounted_rewards[i] * log_action_prob
             pt_loss += -cum_discounted_rewards[i] * torch.exp(log_action_prob)'''
-        pg_loss = -final_reward * torch.sum(log_action_probs)
-        pt_loss = -final_reward * torch.sum(torch.exp(log_action_probs))
+        #pg_loss = -final_reward * torch.sum(log_action_probs)
+        # LSTM loss
+        seq_loss_print = []
+        seq_loss = 0.0
+        # label_by_category = utils.filter_category_actions(labels, self.id2type, self.output_categories)
+        label_by_batch = utils.filter_batched_category_actions(labels, self.id2type, self.output_categories)
+        
+        label_by_category = utils.reshape_batched_category_actions(label_by_batch)
+        
+#         filter_time = time.time()
+#         print("filter time:", filter_time - cat_time)
+        
+        for i in range(self.output_categories):
+            loss_cat = []
+            if torch.sum(no_output_bi[:, i]) == batch_size:
+                seq_loss_print.append(np.nan)
+            else:
+                for j in range(batch_size):
+                    reward_sample = self.reward_fun(action_list_by_category[i][j], label_by_category[i][j])
+                    reward_greedy = self.reward_fun(greedy_list_by_category[i][j], label_by_category[i][j])
+                    reward = reward_sample - reward_greedy
+                    log_prob = torch.sum(torch.log(action_prob_by_category[i][j]))
+                    seq_loss_category = -reward * log_prob
+                    seq_loss += seq_loss_category
+                    if no_output_bi[j][i]:
+                        loss_cat.append(np.nan)
+                    else:
+                        loss_cat.append(seq_loss_category.detach().item())
+                seq_loss_print.append(np.nanmean(loss_cat))
+        seq_loss /= batch_size
+        
+#         seq_time = time.time()
+#         print("seq time:", seq_time - filter_time)
+        '''# debug
+        debug_loss = []
+        last_log_prob = []'''
+        
+        '''for i in range(self.output_categories):
+            if no_output_bi[i]:
+                seq_loss_print.append(np.nan)
+            else:
+                reward_sample = self.reward_fun(action_list_by_category[i], label_by_category[i])
+                reward_greedy = self.reward_fun(greedy_list_by_category[i], label_by_category[i])
+                reward = reward_sample - reward_greedy
+                log_prob = torch.sum(torch.log(action_prob_by_category[i]))
+                seq_loss_category = -reward * log_prob
+                
+#                 print('reward_sample', reward_sample)
+#                 print('reward_greedy', reward_greedy)
+#                 print("reward:", reward)
+#                 print("log_prob:", -log_prob)
+                
+                seq_loss += seq_loss_category
+                seq_loss_print.append(seq_loss_category.detach().item())
+                #debug_loss.append(seq_loss_category.detach())
+                #last_log_prob.append(log_prob.data.cpu())'''
+        
+        # binary classifier loss
+        #bi_loss = -torch.sum(log_bi_probs * bi_labels)
+        #bi_loss_print = list(-torch.sum(log_bi_probs * bi_labels, 1).detach().cpu().numpy())
+        bi_loss = -torch.sum(log_bi_probs * bi_labels) / batch_size
+        bi_loss_print = list((torch.sum((log_bi_probs * bi_labels).view(self.output_categories, -1), 1) / batch_size).cpu().detach().numpy())
+        
+#         bi_time = time.time()
+#         print("bi time:", bi_time - seq_time)
+        
+        #debug_loss.append(bi_loss.detach())
+        '''print(-torch.sum(log_bi_probs * bi_labels, 1))
+        print(-torch.sum(log_bi_probs * bi_labels, 1).detach())
+        print(list(-torch.sum(log_bi_probs * bi_labels, 1).detach().cpu().numpy()))
+        print(type(np.array([1,0,1])))
+        print(type(bi_loss_print))
+        print(bi_loss_print.shape)
+        assert 1==0'''
+        #bi_loss = - torch.sum(log_bi_probs[0] * bi_labels[0])
+
+        #########################
+        # SWITCH pytorch BCELoss#
+        #########################
+        '''
+        criteria = nn.BCELoss()
+        bi_loss = criteria(bi_prob[0],bi_labels[0])'''
+        
+        #pt_loss = -final_reward * torch.sum(torch.exp(log_action_probs))
         
         loss_dict = {}
-        loss_dict['model_loss'] = pg_loss
-        loss_dict['print_loss'] = float(pt_loss)
+        loss_dict['model_loss'] = seq_loss + bi_loss
+        '''if torch.isnan(loss_dict['model_loss']):
+            print(debug_loss)
+            assert 1==0'''
+        loss_dict['bi_loss'] = bi_loss_print
+        loss_dict['seq_loss'] = seq_loss_print
+        #loss_dict['print_loss'] = float(pt_loss)
         
-        loss_dict['reward'] = final_reward
+        #loss_dict['reward'] = final_reward
         # loss_dict['entropy'] = float(entropy.mean())
-
+        
         return loss_dict
     
     def get_embedding(self, idx):
@@ -156,168 +333,586 @@ class CsgoModel(ReptileModel):
             return ret'''
         return self.embedding[idx]
     
-    def high_att(self, x):
+    def high_att(self, x, side = None):
         # team-level attention
-        h = self.att_LN2(x)
+        if side is None:
+            h = self.att_LN2(x)
+        elif side == 't':
+            h = self.att_LN2_t(x)
+        elif side == 'o':
+            h = self.att_LN2_o(x)
         h = torch.tanh(h)
-        h = self.v2(h)
+        if side is None:
+            h = self.v2(h)
+        elif side == 't':
+            h = self.v2_t(h)
+        elif side == 'o':
+            h = self.v2_o(h)
         att = F.softmax(h, 0)
         ret = torch.sum(att * x, 0)
         return ret
         
-    def low_att(self, x):
+    def low_att(self, x, side = None):
         # player-level attention
-        h = self.att_LN1(x)
+        if side is None:
+            h = self.att_LN1(x)
+        elif side == 's':
+            h = self.att_LN1_s(x)
+        elif side == 't':
+            h = self.att_LN1_t(x)
+        elif side == 'o':
+            h = self.att_LN1_o(x)
         h = torch.tanh(h)
-        h = self.v1(h)
+        if side is None:
+            h = self.v1(h)
+        elif side == 's':
+            h = self.v1_s(h)
+        elif side == 't':
+            h = self.v1_t(h)
+        elif side == 'o':
+            h = self.v1_o(h)
         att = F.softmax(h, 0)
         ret = torch.sum(att * x, 0)
         return ret
     
-    def classif_LN(self, x):
-        out = self.LN1(x)
-        out = F.relu(out)
-        out = self.LNDropout(out)
-        out = self.LN2(out)
-        out = self.LNDropout(out)
+    def BiClassif(self, x, category_id):
+        if category_id == 0:
+            h_bi = self.BClassif1_1(x)
+            h_bi = F.relu(h_bi)
+            h_bi = self.LNDropout(h_bi)
+            h_bi = self.BClassif1_2(h_bi)
+            h_bi = F.relu(h_bi)
+            h_bi = self.LNDropout(h_bi)
+            h_bi = self.BClassif1_3(h_bi)
+            h_bi = F.relu(h_bi)
+            h_bi = self.LNDropout(h_bi)
+            h_bi = self.BClassif1_4(h_bi)
+        elif category_id == 1:
+            h_bi = self.BClassif2_1(x)
+            h_bi = F.relu(h_bi)
+            h_bi = self.LNDropout(h_bi)
+            h_bi = self.BClassif2_2(h_bi)
+            h_bi = F.relu(h_bi)
+            h_bi = self.LNDropout(h_bi)
+            h_bi = self.BClassif2_3(h_bi)
+            h_bi = F.relu(h_bi)
+            h_bi = self.LNDropout(h_bi)
+            h_bi = self.BClassif2_4(h_bi)
+        elif category_id == 2:
+            h_bi = self.BClassif3_1(x)
+            h_bi = F.relu(h_bi)
+            h_bi = self.LNDropout(h_bi)
+            h_bi = self.BClassif3_2(h_bi)
+            h_bi = F.relu(h_bi)
+            h_bi = self.LNDropout(h_bi)
+            h_bi = self.BClassif3_3(h_bi)
+            h_bi = F.relu(h_bi)
+            h_bi = self.LNDropout(h_bi)
+            h_bi = self.BClassif3_4(h_bi)
+        else:
+            raise NotImplementedError("Category ID exceeds number of output categories.")
+        
+        return F.softmax(h_bi, dim = -1)
+    
+    def classif_LN(self, x, category_id):
+        if category_id == 0:
+            out = self.LN1_1(x)
+            out = F.relu(out)
+            out = self.LNDropout(out)
+            out = self.LN1_2(out)
+        elif category_id == 1:
+            out = self.LN2_1(x)
+            out = F.relu(out)
+            out = self.LNDropout(out)
+            out = self.LN2_2(out)
+        elif category_id == 2:
+            out = self.LN3_1(x)
+            out = F.relu(out)
+            out = self.LNDropout(out)
+            out = self.LN3_2(out)
+        else:
+            raise NotImplementedError("Category ID exceeds number of output categories.")
+        
         out = F.softmax(out, dim = -1)
         #action_dist = F.softmax(
         #    torch.squeeze(A @ torch.unsqueeze(X2, 2), 2) - (1 - action_mask) * ops.HUGE_INT, dim=-1)
         return out
     
     def money_mask(self, money):
-        return (self.prices <= money).float().cuda() 
+        return (self.prices <= money).float().cuda()
     
-    def forward(self, data):
+    def get_residual_capacity(self, l, capacity):
+        possession = Counter(l)
+        residual_capacity = capacity.copy()
+        for key, value in possession.items():
+            residual_capacity[key] -= value
+        return residual_capacity
+    
+    def get_capacity_mask(self, res_action_capacity, mute_mask):
+        # is_mute = (torch.tensor(res_action_capacity) == 0).float().cuda()
+        ret = []
+        for j in range(len(res_action_capacity)):
+            mask = torch.ones(mute_mask.size()[1]).cuda()
+            for i, res_cap in enumerate(res_action_capacity[j]):
+                if res_cap == 0:
+                    mask *= mute_mask[i]
+            ret.append(mask.unsqueeze(0))
+        return torch.cat(ret, 0)
+        
+    
+    def forward(self, data, gate=True):
         '''
         forward for one round
         x: idx of weapons, x = [x_s, x_t, x_o]
         x_s: num_weapon #(num_batch, num_shot, num_weapon)
         x_t, x_o: (num_player, num_weapon) #(num_batch, num_shot, num_player, num_weapon)
         '''
+#         start_time = time.time()
         
-        side, x_s, money_s, perf_s, score, x_t, x_o = data
-        # represent allies
-        ht = []
-        for xti, moneyi, perfi in x_t:
-            hti = self.low_att(self.get_embedding(xti))
-            hti = torch.cat([hti, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
-            ht.append(hti.unsqueeze(0))
-        ht = torch.cat(ht, 0)
-        ht = self.high_att(ht)
-        
-        # represent enemies
-        ho = []
-        for xoi, moneyi, perfi in x_o:
-            hoi = self.low_att(self.get_embedding(xoi))
-            hoi = torch.cat([hoi, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
-            ho.append(hoi.unsqueeze(0))
-        ho = torch.cat(ho, 0)
-        ho = self.high_att(ho)
-        
-        # represent self
-        hs = self.low_att(self.get_embedding(x_s))
-        hs = torch.cat([hs, torch.tensor(money_s).cuda(), torch.tensor(perf_s).cuda()], -1)
-        
-        
-        '''x_s, x_t, x_o = x
-        perf_s, perf_t, perf_o = performance
-        money_s, money_t, money_o = money
-        x_s = self.get_embedding(x_s)
-        x_t = self.get_embedding(x_t)
-        x_o = self.get_embedding(x_o)
-        
-        # represent allies
-        ht = []
-        for xti, perfi, moneyi in zip(x_t, perf_t, money_t):
-            hti = self.low_att(xti)
-            hti = torch.cat([hti, torch.tensor([perfi]).cuda(), torch.tensor([moneyi]).cuda()], -1)
-            ht.append(hti.unsqueeze(0))
-        ht = torch.cat(ht, 0)
-        ht = self.high_att(ht)
-        
-        # represent enemies
-        ho = []
-        for xoi, perfi, moneyi in zip(x_o, perf_o, money_o):
-            hoi = self.low_att(xoi)
-            hoi = torch.cat([hoi, torch.tensor([perfi]).cuda(), torch.tensor([moneyi]).cuda()], -1)
-            ho.append(hoi.unsqueeze(0))
-        ho = torch.cat(ho, 0)
-        ho = self.high_att(ho)
+        batch_size = len(data)
+        h = []
+        money_all = []
+        x_s_all = []
+        side_all = []
+        for db in data:
+            side, x_s, money_s, perf_s, score, x_t, x_o = db
+            money_all.append(money_s[0])
+            x_s_all.append(x_s)
+            side_all.append(side[0])
+            # represent allies
+            ht = []
+            for xti, moneyi, perfi in x_t:
+                if self.shared_attention_weight:
+                    hti = self.low_att(self.get_embedding(xti))
+                else:
+                    hti = self.low_att(self.get_embedding(xti), 't')
+                hti = torch.cat([hti, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
+                ht.append(hti.unsqueeze(0))
+            ht = torch.cat(ht, 0)
+            if self.shared_attention_weight:
+                ht = self.high_att(ht)
+            else:
+                ht = self.high_att(ht, 't')
 
-        # represent self
-        hs = self.low_att(x_s)
-        hs = torch.cat([hs, torch.tensor([perf_s]).cuda(), torch.tensor([money_s]).cuda()], -1)'''
+            # represent enemies
+            ho = []
+            for xoi, moneyi, perfi in x_o:
+                if self.shared_attention_weight:
+                    hoi = self.low_att(self.get_embedding(xoi))
+                else:
+                    hoi = self.low_att(self.get_embedding(xoi), 'o')
+                hoi = torch.cat([hoi, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
+                ho.append(hoi.unsqueeze(0))
+            ho = torch.cat(ho, 0)
+            if self.shared_attention_weight:
+                ho = self.high_att(ho)
+            else:
+                ho = self.high_att(ho, 'o')
+
+            # represent self
+            if self.shared_attention_weight:
+                hs = self.low_att(self.get_embedding(x_s))
+            else:
+                hs = self.low_att(self.get_embedding(x_s), 's')
+            hs = torch.cat([hs, torch.tensor(money_s).cuda(), torch.tensor(perf_s).cuda()], -1)
+
+            # concat representations
+            hb = torch.cat([hs, ht, ho], -1)
+
+            # incorporate team information
+            hb = torch.cat([hb, self.side_embedding[side[0]], torch.tensor(score).cuda()], -1)
+            
+            h.append(hb.unsqueeze(0))
         
-        # concat representations
-        h = torch.cat([hs, ht, ho], -1)
+        h = torch.cat(h, 0)
+        assert h.size()[0] == batch_size
         
-        # incorporate team information
-        h = torch.cat([h, self.side_embedding[side[0]], torch.tensor(score).cuda()], -1)
+#         encoding_time = time.time()
+#         print("encoding time:", encoding_time - start_time)
+        
+        '''# return binary classifier values
+        bi_prob = []
+        no_output_bi = []
+        # binary classifier for each category indicating whether to generate actions in this category
+        for i in range(self.output_categories):
+            break
+            # do not backward binary classification loss
+            #h_bi = self.BiClassif1[i](h.detach())
+            h_bi = self.BiClassif1[i](h)
+            h_bi = F.relu(h_bi)
+            # h_bi = F.relu(h_bi)
+            #h_bi = self.LNDropout(h_bi)
+            h_bi = self.BiClassif2[i](h_bi)
+            h_bi = F.relu(h_bi)
+            #h_bi = self.LNDropout(h_bi)
+            h_bi = self.BiClassif3[i](h_bi)
+            h_bi = F.relu(h_bi)
+            #h_bi = self.LNDropout(h_bi)
+            h_bi = self.BiClassif4[i](h_bi)
+            h_bi = F.softmax(h_bi, dim = -1).view(-1)
+            bi_prob.append(h_bi)
+            no_output_bi.append(h_bi[0] > h_bi[1])'''
+        
+        # seperate binary classifier
+        bi_prob = []
+        no_output_bi = []
+        for i in range(self.output_categories):
+            h_bi = self.BiClassif(h.detach(), i)
+            bi_prob.append(h_bi.unsqueeze(1))
+            no_output_bi.append((h_bi[:, 0] > h_bi[:, 1]).unsqueeze(1))
+        bi_prob = torch.cat(bi_prob, 1)
+        no_output_bi = torch.cat(no_output_bi, 1)
+        
+#         bi_time = time.time()
+#         print("bi classifier:", bi_time - encoding_time)
         
         # return values - predictions and probabilities
         action_list = []
         greedy_list = []
-        action_prob = []
-        money_s = money_s[0] * self.money_scaling
+        action_prob_by_category = []
+        action_list_by_category = []
+        greedy_list_by_category = []
+        
+        # resource left
+        money = torch.tensor(money_all).cuda() * self.money_scaling
+        res_action_capacity = []
+        res_type_capacity = []
+        for x_s in x_s_all:
+            res_action_capacity.append(self.get_residual_capacity(x_s, self.action_capacity))
+            res_type_capacity.append(self.get_residual_capacity(self.id2type[x_s], self.type_capacity))
+        #res_action_capacity = self.get_residual_capacity(x_s_all, self.action_capacity)
+        #res_type_capacity = self.get_residual_capacity(self.id2type[x_s], self.type_capacity)
+        res_action_capacity = torch.tensor(res_action_capacity).cuda()
+        res_type_capacity = torch.tensor(res_type_capacity).cuda()
         
         # initialize lstm
-        init_action = self.start_idx
-        self.initialize_lstm(h, init_action)
+        init_action = [self.start_idx] * batch_size
+        init_embedding = self.get_embedding(init_action).unsqueeze(1)
+        # transform representation to initialize (h, c)
+        init_h = self.HLN(h).view(self.history_num_layers, batch_size, self.history_dim)
+        init_c = self.CLN(h).view(self.history_num_layers, batch_size, self.history_dim)
+        '''init_h = self.HLN(h.detach()).view(self.history_num_layers, 1, self.history_dim)
+        init_c = self.CLN(h.detach()).view(self.history_num_layers, 1, self.history_dim)'''
+        
+        # debug
+        #print(self.att_LN1.weight.grad)
+        '''for name, param in self.rnn1.named_parameters():
+            print(name)
+            print(param)
+        assert 1==0
+        global last_weight, last_weight_grad, action_dist_debug1, action_dist_debug2, action_dist_debug3
+        if torch.isnan(torch.sum(self.att_LN1.weight)):
+            print(debug_loss)
+            print(last_weight)
+            print(last_weight_grad)
+            print(self.att_LN1.weight)
+            print(self.att_LN1.weight.grad)
+            print(self.rnn1.weight_ih_l0)
+            print(self.rnn2.weight_ih_l0)
+            print(self.rnn3.weight_ih_l0)
+            print(last_log_prob)
+            print(last_log_prob[0].grad)
+            print(action_dist_debug1)
+            print(action_dist_debug2)
+            print(action_dist_debug3)
+            assert 1==0
+        
+        last_weight = self.att_LN1.weight.clone()
+        last_weight_grad = self.att_LN1.weight.grad
+        action_dist_debug1, action_dist_debug2, action_dist_debug3 = [], [], []'''
+#         ls_time = time.time()
+#         print("lstm preprocess time:", ls_time - bi_time)
         
         # generate predictions
-        for i in range(self.max_output_num):
-            H = self.history[-1][0][-1, :, :]
-            action_dist = self.classif_LN(H)
-            action_mask = self.money_mask(money_s) * self.action_mask * self.side_mask[side[0]]
-            # is_zero = (torch.sum(r_prob_b, 1) == 0).float().unsqueeze(1)
-            action_dist = action_dist * action_mask + (1 - action_mask) * EPSILON
-            action_idx = torch.multinomial(action_dist, 1, replacement=True).item()
-            action_prob.append(action_dist[0][action_idx])
-            if action_idx == self.end_idx:
-                break
-            action_list.append(action_idx)
-            # greedy_idx = torch.argmax(action_dist).item()
-            # greedy_list.append(greedy_idx)
-            self.update_lstm(action_idx)
-            # TODO
-            # money = money - self.prices[action_idx]
-            # xs = torch.cat([xs.unsqueeze(0), self.get_embedding(out_id).unsqueeze(0)], 0)
+        for j in range(self.output_categories):
+            '''if gate and no_output_bi[j]:
+                action_prob_by_category.append([])
+                action_list_by_category.append([])
+                #print('no output')
+                continue
+            else:'''
+            # initialize LSTM
+            self.initialize_lstm(init_embedding, (init_h, init_c), j)
+
+            action_prob_category = []
+            action_list_category = []
+            is_end = no_output_bi[:, j].float()
+            for i in range(self.max_output_num):
+                if torch.sum(is_end) == len(is_end):
+                    for _ in range(self.max_output_num - i):
+                        action_list.append(torch.ones(batch_size, 1).long().cuda() * self.end_idx)
+                        action_list_category.append(torch.ones(batch_size, 1).long().cuda() * self.end_idx)
+                        action_prob_category.append(torch.ones(batch_size, 1).double().cuda())
+                    break
+                
+                H = self.history[-1][0][-1, :, :]
+                action_dist = self.classif_LN(H, j)
+
+                #history_temp = self.history
+                #H_temp = H.cpu()
+                #action_dist_unmask = action_dist.cpu()
+
+                action_mask = self.money_mask(money.unsqueeze(1)) * self.side_mask[side_all]
+                #action_mask *= self.category_mask[j]
+                action_mask *= self.get_capacity_mask(res_action_capacity, self.mute_action_mask)
+                action_mask *= self.get_capacity_mask(res_type_capacity, self.mute_type_mask)
+                action_mask = action_mask[:, self.category_action_offset[j]]
+                action_dist = action_dist * action_mask # + (1 - action_mask) * EPSILON
+
+                # nan in action_dist
+                #action_dist[action_dist != action_dist] = 0.0
+
+                is_zero = (torch.sum(action_dist, 1) == 0).float().unsqueeze(1)
+                mask_all_tensor = torch.zeros(action_dist.size()[1], dtype = torch.float).cuda()
+                mask_all_tensor[-1] = 1.0
+                action_dist = action_dist + is_zero * mask_all_tensor
+                
+                if is_end is not None:
+                    action_dist = (1 - is_end.unsqueeze(1)) * action_dist + is_end.unsqueeze(1) * mask_all_tensor
+                
+                # normalize
+                action_dist = action_dist / torch.sum(action_dist, 1).unsqueeze(1)
+                
+                output_idx = torch.multinomial(action_dist, 1, replacement=True)
+                action_idx = torch.tensor(self.category_action_offset[j]).cuda()[output_idx]
+                
+                #action_prob.append(action_dist[0][action_idx])
+                #action_prob_category.append(action_dist[0][output_idx].unsqueeze(0))
+                action_prob_category.append(torch.gather(action_dist, 1, output_idx))
+                
+                #if action_idx == self.end_idx:
+                #    break
+                # TODO: current implementation is to keep outputing end token
+                is_end = (action_idx == self.end_idx).view(-1).float()
+                
+                #action_list.append(action_idx)
+                #action_list_category.append(action_idx)
+                #action_list.append(action_idx)
+                action_list.append(action_idx)
+                action_list_category.append(action_idx)
+                
+                self.update_lstm(action_idx, j)
+                
+                #money = money - self.prices[action_idx]
+                #res_action_capacity[action_idx] -= 1
+                #res_type_capacity[self.id2type[action_idx]] -= 1
+                money = money - self.prices[action_idx.view(-1)]
+                res_action_capacity -= torch.eye(res_action_capacity.size()[1]).cuda()[action_idx.view(-1)]
+                res_type_capacity -= torch.eye(res_type_capacity.size()[1]).cuda()[torch.tensor(self.id2type).cuda()[action_idx.view(-1)]]
+                
+                #assert money >= 0
+                #assert res_action_capacity[action_idx] >= 0
+                #assert res_type_capacity[self.id2type[action_idx]] >= 0
+                assert torch.sum((money >= 0).float()) == batch_size
+                assert torch.sum((res_action_capacity >= 0).float()) == len(res_action_capacity.view(-1))
+                assert torch.sum((res_type_capacity >= 0).float()) == len(res_type_capacity.view(-1))
+                
+                # xs = torch.cat([xs.unsqueeze(0), self.get_embedding(out_id).unsqueeze(0)], 0)
+            action_list_by_category.append(utils.remove_token(torch.cat(action_list_category, 1).cpu().numpy().tolist(), self.end_idx))
+            action_prob_by_category.append(torch.cat(action_prob_category, 1))
+        action_list = torch.cat(action_list, 1).cpu().numpy().tolist()
+        action_list = utils.remove_token(action_list, self.end_idx)
+        
+        '''for j in range(self.output_categories):
+            if gate and no_output_bi[j]:
+                action_prob_by_category.append([])
+                action_list_by_category.append([])
+                #print('no output')
+                continue
+            else:
+                # initialize LSTM
+                self.initialize_lstm(init_embedding, (init_h, init_c), j)
+                
+                action_prob_category = []
+                action_list_category = []
+                for i in range(self.max_output_num):
+                    H = self.history[-1][0][-1, :, :]
+                    action_dist = self.classif_LN(H, j)
+                    
+                    #history_temp = self.history
+                    #H_temp = H.cpu()
+                    #action_dist_unmask = action_dist.cpu()
+                    
+                    action_mask = self.money_mask(money) * self.side_mask[side[0]]
+                    #action_mask *= self.category_mask[j]
+                    action_mask *= self.get_capacity_mask(torch.tensor(res_action_capacity).unsqueeze(0).cuda(), self.mute_action_mask).view(-1)
+                    action_mask *= self.get_capacity_mask(torch.tensor(res_type_capacity).unsqueeze(0).cuda(), self.mute_type_mask).view(-1)
+                    action_mask = action_mask[self.category_action_offset[j]]
+                    action_dist = action_dist * action_mask # + (1 - action_mask) * EPSILON
+                    
+                    # nan in action_dist
+                    #action_dist[action_dist != action_dist] = 0.0
+                    
+                    is_zero = (torch.sum(action_dist) == 0).float()
+                    
+                    mask_all_tensor = torch.zeros_like(action_dist, dtype = torch.float).cuda().view(-1)
+                    mask_all_tensor[-1] = 1.0
+                    action_dist = action_dist + is_zero * mask_all_tensor
+                    # normalize
+                    #action_dist = action_dist / torch.sum(action_dist)
+                    output_idx = torch.multinomial(action_dist, 1, replacement=True).item()
+                    action_idx = self.category_action_offset[j][output_idx]
+                    
+                    #action_prob.append(action_dist[0][action_idx])
+                    action_prob_category.append(action_dist[0][output_idx].unsqueeze(0))
+                    if action_idx == self.end_idx:
+                        break
+                    #action_list.append(action_idx)
+                    action_list_category.append(action_idx)
+                    action_list.append(action_idx)
+                    self.update_lstm(action_idx, j)
+                    money = money - self.prices[action_idx]
+                    res_action_capacity[action_idx] -= 1
+                    res_type_capacity[self.id2type[action_idx]] -= 1
+                    assert money >= 0
+                    assert res_action_capacity[action_idx] >= 0
+                    assert res_type_capacity[self.id2type[action_idx]] >= 0
+                    # xs = torch.cat([xs.unsqueeze(0), self.get_embedding(out_id).unsqueeze(0)], 0)
+                action_list_by_category.append(action_list_category)
+                action_prob_by_category.append(torch.cat(action_prob_category, 0))'''
+        
+#         sample_time = time.time()
+#         print("lstm sample:", sample_time - ls_time)
+        
         # greedy
-        init_action = self.start_idx
-        self.initialize_lstm(h, init_action)
-        for i in range(self.max_output_num):
-            H = self.history[-1][0][-1, :, :]
-            action_dist = self.classif_LN(H)
-            action_mask = self.money_mask(money_s) * self.action_mask * self.side_mask[side[0]]
-            # is_zero = (torch.sum(r_prob_b, 1) == 0).float().unsqueeze(1)
-            action_dist = action_dist * action_mask + (1 - action_mask) * EPSILON
-            action_idx = torch.argmax(action_dist).item()
-            if action_idx == self.end_idx:
-                break
-            greedy_list.append(action_idx)
-            self.update_lstm(action_idx)
-            # TODO
-            # money = money - self.prices[action_idx]
+        # resource left
+        money = torch.tensor(money_all).cuda() * self.money_scaling
+        res_action_capacity = []
+        res_type_capacity = []
+        for x_s in x_s_all:
+            res_action_capacity.append(self.get_residual_capacity(x_s, self.action_capacity))
+            res_type_capacity.append(self.get_residual_capacity(self.id2type[x_s], self.type_capacity))
+        #res_action_capacity = self.get_residual_capacity(x_s_all, self.action_capacity)
+        #res_type_capacity = self.get_residual_capacity(self.id2type[x_s], self.type_capacity)
+        res_action_capacity = torch.tensor(res_action_capacity).cuda()
+        res_type_capacity = torch.tensor(res_type_capacity).cuda()
+        
+        for j in range(self.output_categories):
+            # initialize LSTM
+            self.initialize_lstm(init_embedding, (init_h, init_c), j)
+
+            greedy_list_category = []
+            is_end = no_output_bi[:, j].float()
+            for i in range(self.max_output_num):
+                if torch.sum(is_end) == len(is_end):
+                    for _ in range(self.max_output_num - i):
+                        greedy_list.append(torch.ones(batch_size, 1).long().cuda() * self.end_idx)
+                        greedy_list_category.append(torch.ones(batch_size, 1).long().cuda() * self.end_idx)
+                    break
+                
+                H = self.history[-1][0][-1, :, :]
+                action_dist = self.classif_LN(H, j)
+
+                action_mask = self.money_mask(money.unsqueeze(1)) * self.side_mask[side_all]
+                #action_mask *= self.category_mask[j]
+                action_mask *= self.get_capacity_mask(res_action_capacity, self.mute_action_mask)
+                action_mask *= self.get_capacity_mask(res_type_capacity, self.mute_type_mask)
+                action_mask = action_mask[:, self.category_action_offset[j]]
+                action_dist = action_dist * action_mask # + (1 - action_mask) * EPSILON
+
+                is_zero = (torch.sum(action_dist, 1) == 0).float().unsqueeze(1)
+                mask_all_tensor = torch.zeros(action_dist.size()[1], dtype = torch.float).cuda()
+                mask_all_tensor[-1] = 1.0
+                action_dist = action_dist + is_zero * mask_all_tensor
+                
+                if is_end is not None:
+                    action_dist = (1 - is_end.unsqueeze(1)) * action_dist + is_end.unsqueeze(1) * mask_all_tensor
+                
+
+                output_idx = torch.argmax(action_dist, 1).unsqueeze(1)
+                action_idx = torch.tensor(self.category_action_offset[j]).cuda()[output_idx]
+                
+                is_end = (action_idx == self.end_idx).view(-1).float()
+                
+                #greedy_list.append(action_idx)
+                greedy_list_category.append(action_idx)
+                greedy_list.append(action_idx)
+                
+                self.update_lstm(action_idx, j)
+                
+                #money = money - self.prices[action_idx]
+                #res_action_capacity[action_idx] -= 1
+                #res_type_capacity[self.id2type[action_idx]] -= 1
+                money = money - self.prices[action_idx.view(-1)]
+                res_action_capacity -= torch.eye(res_action_capacity.size()[1]).cuda()[action_idx.view(-1)]
+                res_type_capacity -= torch.eye(res_type_capacity.size()[1]).cuda()[torch.tensor(self.id2type).cuda()[action_idx.view(-1)]]
+                
+                #assert money >= 0
+                #assert res_action_capacity[action_idx] >= 0
+                #assert res_type_capacity[self.id2type[action_idx]] >= 0
+                assert torch.sum((money >= 0).float()) == batch_size
+                assert torch.sum((res_action_capacity >= 0).float()) == len(res_action_capacity.view(-1))
+                assert torch.sum((res_type_capacity >= 0).float()) == len(res_type_capacity.view(-1))
+            greedy_list_by_category.append(utils.remove_token(torch.cat(greedy_list_category, 1).cpu().numpy().tolist(), self.end_idx))
+        greedy_list = torch.cat(greedy_list, 1).cpu().numpy().tolist()
+        greedy_list = utils.remove_token(greedy_list, self.end_idx)
+        
+#         greedy_time = time.time()
+#         print("greedy time:", greedy_time - sample_time)
+        
+        '''for j in range(self.output_categories):
+            if gate and no_output_bi[j]:
+                greedy_list_by_category.append([])
+                continue
+            else:
+                # initialize LSTM
+                self.initialize_lstm(init_embedding, (init_h, init_c), j)
+                
+                greedy_list_category = []
+                for i in range(self.max_output_num):
+                    H = self.history[-1][0][-1, :, :]
+                    action_dist = self.classif_LN(H, j)
+                    
+                    action_mask = self.money_mask(money) * self.side_mask[side[0]]
+                    #action_mask *= self.category_mask[j]
+                    action_mask *= self.get_capacity_mask(torch.tensor(res_action_capacity).unsqueeze(0).cuda(), self.mute_action_mask).view(-1)
+                    action_mask *= self.get_capacity_mask(torch.tensor(res_type_capacity).unsqueeze(0).cuda(), self.mute_type_mask).view(-1)
+                    action_mask = action_mask[self.category_action_offset[j]]
+                    action_dist = action_dist * action_mask # + (1 - action_mask) * EPSILON
+                    
+                    # nan in action_dist
+                    #action_dist[action_dist != action_dist] = 0.0
+                    
+                    is_zero = (torch.sum(action_dist) == 0).float()
+                    mask_all_tensor = torch.zeros_like(action_dist, dtype = torch.float).cuda().view(-1)
+                    mask_all_tensor[-1] = 1.0
+                    action_dist = action_dist + is_zero * mask_all_tensor
+                    
+                    output_idx = torch.argmax(action_dist).item()
+                    action_idx = self.category_action_offset[j][output_idx]
+                    if action_idx == self.end_idx:
+                        break
+                    #greedy_list.append(action_idx)
+                    greedy_list_category.append(action_idx)
+                    greedy_list.append(action_idx)
+                    self.update_lstm(action_idx, j)
+                    money = money - self.prices[action_idx]
+                    res_action_capacity[action_idx] -= 1
+                    res_type_capacity[self.id2type[action_idx]] -= 1
+                    
+                    assert money >= 0
+                    assert res_action_capacity[action_idx] >= 0
+                    assert res_type_capacity[self.id2type[action_idx]] >= 0
+                greedy_list_by_category.append(greedy_list_category)'''
+        
             
             
         
-        '''print('ggg')
-        print(greedy_list)
-        print('sss')
-        print(action_list)'''
-        return action_list, action_prob, greedy_list
+        return action_list, greedy_list, action_prob_by_category, no_output_bi.cpu().numpy().tolist(), bi_prob, action_list_by_category, greedy_list_by_category
             
         
     
-    def initialize_lstm(self, representation, init_action):
-        init_embedding = self.get_embedding(init_action).unsqueeze(0).unsqueeze(1)
-        # transform representation to initialize (h, c)
-        init_h = self.HLN(representation).view(self.history_num_layers, 1, self.history_dim)
-        init_c = self.CLN(representation).view(self.history_num_layers, 1, self.history_dim)
-        self.history = [self.rnn(init_embedding, (init_h, init_c))[1]]
+    def initialize_lstm(self, init_embedding, init_state, category_id):
+        if category_id == 0:
+            self.history = [self.rnn1(init_embedding, init_state)[1]]
+        elif category_id == 1:
+            self.history = [self.rnn2(init_embedding, init_state)[1]]
+        elif category_id == 2:
+            self.history = [self.rnn3(init_embedding, init_state)[1]]
+        else:
+            raise NotImplementedError("Category ID exceeds number of output categories.")
     
-    def update_lstm(self, action, offset=None):
+    def update_lstm(self, action, category_id, offset=None):
 
         def offset_path_history(p, offset):
             for i, x in enumerate(p):
@@ -326,24 +921,19 @@ class CsgoModel(ReptileModel):
                     p[i] = new_tuple
                 else:
                     p[i] = x[offset, :]
-
-
-        # update action history
-        #if self.relation_only_in_path:
-        #    action_embedding = kg.get_relation_embeddings(action[0])
-        #else:
-        #    action_embedding = self.get_action_embedding(action, kg)
+        
         embedding = self.get_embedding(action).view(-1, 1, self.embedding_dim)
         if offset is not None:
             offset_path_history(self.history, offset.view(-1))
-            # during inference, update batch size
-            # self.hidden_tensor = offset_rule_history(self.hidden_tensor, offset)
-            # self.cell_tensor = offset_rule_history(self.cell_tensor, offset)
-            
-
-        # self.path.append(self.path_encoder(action_embedding.unsqueeze(1), self.path[-1])[1])
         torch.backends.cudnn.enabled = False
-        self.history.append(self.rnn(embedding, self.history[-1])[1])
+        if category_id == 0:
+            self.history.append(self.rnn1(embedding, self.history[-1])[1])
+        elif category_id == 1:
+            self.history.append(self.rnn2(embedding, self.history[-1])[1])
+        elif category_id == 2:
+            self.history.append(self.rnn3(embedding, self.history[-1])[1])
+        else:
+            raise NotImplementedError("Category ID exceeds number of output categories.")
 
     def print_all_model_parameters(self):
         print('\nModel Parameters')
@@ -371,53 +961,40 @@ class CsgoModel(ReptileModel):
         # represent allies
         ht = []
         for xti, moneyi, perfi in x_t:
-            hti = self.low_att(self.get_embedding(xti))
+            if self.shared_attention_weight:
+                hti = self.low_att(self.get_embedding(xti))
+            else:
+                hti = self.low_att(self.get_embedding(xti), 't')
             hti = torch.cat([hti, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
             ht.append(hti.unsqueeze(0))
         ht = torch.cat(ht, 0)
-        ht = self.high_att(ht)
+        if self.shared_attention_weight:
+            ht = self.high_att(ht)
+        else:
+            ht = self.high_att(ht, 't')
         
         # represent enemies
         ho = []
         for xoi, moneyi, perfi in x_o:
-            hoi = self.low_att(self.get_embedding(xoi))
+            if self.shared_attention_weight:
+                hoi = self.low_att(self.get_embedding(xoi))
+            else:
+                hoi = self.low_att(self.get_embedding(xoi), 'o')
             hoi = torch.cat([hoi, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
             ho.append(hoi.unsqueeze(0))
         ho = torch.cat(ho, 0)
-        ho = self.high_att(ho)
+        if self.shared_attention_weight:
+            ho = self.high_att(ho)
+        else:
+            ho = self.high_att(ho, 'o')
         
         # represent self
-        hs = self.low_att(self.get_embedding(x_s))
+        if self.shared_attention_weight:
+            hs = self.low_att(self.get_embedding(x_s))
+        else:
+            hs = self.low_att(self.get_embedding(x_s), 's')
         hs = torch.cat([hs, torch.tensor(money_s).cuda(), torch.tensor(perf_s).cuda()], -1)
         
-        '''x_s, x_t, x_o = x
-        perf_s, perf_t, perf_o = performance
-        money_s, money_t, money_o = money
-        x_s = self.get_embedding(x_s)
-        x_t = self.get_embedding(x_t)
-        x_o = self.get_embedding(x_o)
-        
-        # represent allies
-        ht = []
-        for xti, perfi, moneyi in zip(x_t, perf_t, money_t):
-            hti = self.low_att(xti)
-            hti = torch.cat([hti, torch.tensor([perfi]).cuda(), torch.tensor([moneyi]).cuda()], -1)
-            ht.append(hti.unsqueeze(0))
-        ht = torch.cat(ht, 0)
-        ht = self.high_att(ht)
-        
-        # represent enemies
-        ho = []
-        for xoi, perfi, moneyi in zip(x_o, perf_o, money_o):
-            hoi = self.low_att(xoi)
-            hoi = torch.cat([hoi, torch.tensor([perfi]).cuda(), torch.tensor([moneyi]).cuda()], -1)
-            ho.append(hoi.unsqueeze(0))
-        ho = torch.cat(ho, 0)
-        ho = self.high_att(ho)
-
-        # represent self
-        hs = self.low_att(x_s)
-        hs = torch.cat([hs, torch.tensor([perf_s]).cuda(), torch.tensor([money_s]).cuda()], -1)'''
         
         # concat representations
         h = torch.cat([hs, ht, ho], -1)
@@ -437,15 +1014,21 @@ class CsgoModel(ReptileModel):
         finished = torch.zeros(1).cuda()
         
         action_list = torch.tensor([self.start_idx]).unsqueeze(0).cuda()
-        money_s = torch.tensor([money_s]).cuda() * money_scaling
+        
+        # resource left
+        money_s = torch.tensor(money_s).cuda() * money_scaling
+        res_action_capacity = torch.tensor(self.get_residual_capacity(x_s, self.action_capacity)).unsqueeze(0).cuda()
+        res_type_capacity = torch.tensor(self.get_residual_capacity(self.id2type[x_s], self.type_capacity)).unsqueeze(0).cuda()
         
         # generate predictions
         for i in range(self.max_output_num):
             H = self.history[-1][0][-1, :, :]
             action_dist = self.classif_LN(H)
-            action_mask = self.money_mask(money_s.view(-1, 1)) * self.action_mask * self.side_mask[side[0]]
+            action_mask = self.money_mask(money.view(-1, 1)) * self.action_mask * self.side_mask[side[0]]
+            action_mask *= self.get_capacity_mask(res_action_capacity, self.mute_action_mask)
+            action_mask *= self.get_capacity_mask(res_type_capacity, self.mute_type_mask)
             # is_zero = (torch.sum(r_prob_b, 1) == 0).float().unsqueeze(1)
-            action_dist = action_dist * action_mask + (1 - action_mask) * EPSILON
+            action_dist = action_dist * action_mask # + (1 - action_mask) * EPSILON
             end_mask = torch.zeros(self.output_dim).cuda()
             end_mask[self.end_idx] = 1.0
             action_dist = action_dist * (1 - finished).view(-1, 1) + finished.view(-1, 1) * end_mask
@@ -464,9 +1047,12 @@ class CsgoModel(ReptileModel):
             #print(action_list[0])
             
             self.update_lstm(action_idx, offset = action_offset)
-            # TODO
-            money_s = money_s[action_offset].view(k)
-            money_s = money_s - self.prices[action_idx].view(-1)
+            money = money[action_offset].view(k)
+            money = money - self.prices[action_idx].view(-1)
+            res_action_capacity = res_action_capacity[action_offset].view(k, -1)
+            res_action_capacity -= torch.eye(self.output_dim).cuda()[action_offset.view(-1)]
+            res_type_capacity = res_type_capacity[action_offset].view(k, -1)
+            res_type_capacity -= torch.eye(self.output_dim).cuda()[action_offset.view(-1)]
             
             finished = (action_idx == self.end_idx).float()
             if action_idx.view(-1)[0].item() == self.end_idx:
@@ -487,50 +1073,224 @@ class CsgoModel(ReptileModel):
     def define_modules(self):
         # terrorist
         #self.LN1 = nn.Linear(self.embedding_dim, self.ff_dim)
-        self.att_LN1 = nn.Linear(self.embedding_dim, self.ff_dim)
-        self.v1 = nn.Linear(self.ff_dim, 1)
-        self.att_LN2 = nn.Linear(self.embedding_dim + self.resource_dim, self.ff_dim)
-        self.v2 = nn. Linear(self.ff_dim, 1)
+        if self.shared_attention_weight:
+            self.att_LN1 = nn.Linear(self.embedding_dim, self.ff_dim)
+            self.v1 = nn.Linear(self.ff_dim, 1)
+            self.att_LN2 = nn.Linear(self.embedding_dim + self.resource_dim, self.ff_dim)
+            self.v2 = nn. Linear(self.ff_dim, 1)
+        else:
+            self.att_LN1_s = nn.Linear(self.embedding_dim, self.ff_dim)
+            self.v1_s = nn.Linear(self.ff_dim, 1)
+            self.att_LN1_t = nn.Linear(self.embedding_dim, self.ff_dim)
+            self.v1_t = nn.Linear(self.ff_dim, 1)
+            self.att_LN1_o = nn.Linear(self.embedding_dim, self.ff_dim)
+            self.v1_o = nn.Linear(self.ff_dim, 1)
+            
+            self.att_LN2_t = nn.Linear(self.embedding_dim + self.resource_dim, self.ff_dim)
+            self.v2_t = nn. Linear(self.ff_dim, 1)
+            self.att_LN2_o = nn.Linear(self.embedding_dim + self.resource_dim, self.ff_dim)
+            self.v2_o = nn. Linear(self.ff_dim, 1)
+        
         self.HLN = nn.Linear(self.input_dim, self.history_dim * self.history_num_layers)
         self.CLN = nn.Linear(self.input_dim, self.history_dim * self.history_num_layers)
-        self.LN1 = nn.Linear(self.history_dim, self.ff_dim)
-        self.LN2 = nn.Linear(self.ff_dim, self.output_dim)
+        
         self.LNDropout = nn.Dropout(p=self.ff_dropout_rate)
-        self.rnn = nn.LSTM(input_size = self.embedding_dim,
+        
+        assert self.output_categories == 3
+        
+        self.BClassif1_1=nn.Linear(self.input_dim, self.ff_dim)
+        self.BClassif1_2=nn.Linear(self.ff_dim, 2 * self.ff_dim)
+        self.BClassif1_3=nn.Linear(2 * self.ff_dim, self.ff_dim)
+        self.BClassif1_4=nn.Linear(self.ff_dim, 2)
+        
+        self.BClassif2_1=nn.Linear(self.input_dim, self.ff_dim)
+        self.BClassif2_2=nn.Linear(self.ff_dim, 2 * self.ff_dim)
+        self.BClassif2_3=nn.Linear(2 * self.ff_dim, self.ff_dim)
+        self.BClassif2_4=nn.Linear(self.ff_dim, 2)
+        
+        self.BClassif3_1=nn.Linear(self.input_dim, self.ff_dim)
+        self.BClassif3_2=nn.Linear(self.ff_dim, 2 * self.ff_dim)
+        self.BClassif3_3=nn.Linear(2 * self.ff_dim, self.ff_dim)
+        self.BClassif3_4=nn.Linear(self.ff_dim, 2)
+        
+        self.rnn1 = nn.LSTM(input_size = self.embedding_dim,
+                            hidden_size = self.history_dim,
+                            num_layers = self.history_num_layers,
+                            batch_first = True)
+        
+        self.rnn2 = nn.LSTM(input_size = self.embedding_dim,
+                            hidden_size = self.history_dim,
+                            num_layers = self.history_num_layers,
+                            batch_first = True)
+        
+        self.rnn3 = nn.LSTM(input_size = self.embedding_dim,
+                            hidden_size = self.history_dim,
+                            num_layers = self.history_num_layers,
+                            batch_first = True)
+        
+        self.LN1_1 = nn.Linear(self.history_dim, self.ff_dim)
+        self.LN1_2 = nn.Linear(self.ff_dim, self.output_dim1)
+        
+        self.LN2_1 = nn.Linear(self.history_dim, self.ff_dim)
+        self.LN2_2 = nn.Linear(self.ff_dim, self.output_dim2)
+        
+        self.LN3_1 = nn.Linear(self.history_dim, self.ff_dim)
+        self.LN3_2 = nn.Linear(self.ff_dim, self.output_dim3)
+        
+        '''self.rnn = []
+        self.BiClassif1 = []
+        self.BiClassif2 = []
+        self.BiClassif3 = []
+        self.BiClassif4 = []
+        for i in range(self.output_categories):
+            
+            self.BiClassif1.append(nn.Linear(self.input_dim, self.ff_dim))
+            self.BiClassif2.append(nn.Linear(self.ff_dim, 2 * self.ff_dim))
+            self.BiClassif3.append(nn.Linear(2 * self.ff_dim, self.ff_dim))
+            self.BiClassif4.append(nn.Linear(self.ff_dim, 2))
+            
+            self.rnn.append(nn.LSTM(input_size = self.embedding_dim,
                            hidden_size = self.history_dim,
                            num_layers = self.history_num_layers,
-                           batch_first = True)
+                           batch_first = True))'''
+        
+        
         
         if torch.cuda.is_available():
-            self.att_LN1 = self.att_LN1.cuda()
-            self.v1 = self.v1.cuda()
-            self.att_LN2 = self.att_LN2.cuda()
-            self.v2 = self.v2.cuda()
-            self.LN1 = self.LN1.cuda()
-            self.LN2 = self.LN2.cuda()
+            if self.shared_attention_weight:
+                self.att_LN1 = self.att_LN1.cuda()
+                self.v1 = self.v1.cuda()
+                self.att_LN2 = self.att_LN2.cuda()
+                self.v2 = self.v2.cuda()
+            else:
+                self.att_LN1_s = self.att_LN1_s.cuda()
+                self.v1_s = self.v1_s.cuda()
+                self.att_LN1_t = self.att_LN1_t.cuda()
+                self.v1_t = self.v1_t.cuda()
+                self.att_LN1_o = self.att_LN1_o.cuda()
+                self.v1_o = self.v1_o.cuda()
+                self.att_LN2_t = self.att_LN2_t.cuda()
+                self.v2_t = self.v2_t.cuda()
+                self.att_LN2_o = self.att_LN2_o.cuda()
+                self.v2_o = self.v2_o.cuda()
+            
             self.HLN = self.HLN.cuda()
             self.CLN = self.CLN.cuda()
             self.LNDropout = self.LNDropout.cuda()
-            self.rnn = self.rnn.cuda()
+            
+            self.BClassif1_1=self.BClassif1_1.cuda()
+            self.BClassif1_2=self.BClassif1_2.cuda()
+            self.BClassif1_3=self.BClassif1_3.cuda()
+            self.BClassif1_4=self.BClassif1_4.cuda()
+            
+            self.BClassif2_1=self.BClassif2_1.cuda()
+            self.BClassif2_2=self.BClassif2_2.cuda()
+            self.BClassif2_3=self.BClassif2_3.cuda()
+            self.BClassif2_4=self.BClassif2_4.cuda()
+            
+            self.BClassif3_1=self.BClassif3_1.cuda()
+            self.BClassif3_2=self.BClassif3_2.cuda()
+            self.BClassif3_3=self.BClassif3_3.cuda()
+            self.BClassif3_4=self.BClassif3_4.cuda()
+            
+            self.rnn1 = self.rnn1.cuda()
+            self.rnn2 = self.rnn2.cuda()
+            self.rnn3 = self.rnn3.cuda()
+            
+            self.LN1_1 = self.LN1_1.cuda()
+            self.LN1_2 = self.LN1_2.cuda()
+            
+            self.LN2_1 = self.LN2_1.cuda()
+            self.LN2_2 = self.LN2_2.cuda()
+            
+            self.LN3_1 = self.LN3_1.cuda()
+            self.LN3_2 = self.LN3_2.cuda()
+            
+            '''for i in range(self.output_categories):
+                self.BiClassif1[i] = self.BiClassif1[i].cuda()
+                self.BiClassif2[i] = self.BiClassif2[i].cuda()
+                self.BiClassif3[i] = self.BiClassif3[i].cuda()
+                self.BiClassif4[i] = self.BiClassif4[i].cuda()
+                self.rnn[i] = self.rnn[i].cuda()'''
     
     def initialize_modules(self):
         # xavier initialization
-        for name, param in self.rnn.named_parameters():
+        '''for i in range(self.output_categories):
+            for name, param in self.rnn[i].named_parameters():
+                if 'bias' in name:
+                    nn.init.constant_(param, 0.0)
+                elif 'weight' in name:
+                    nn.init.xavier_normal_(param)'''
+        for name, param in self.rnn1.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0.0)
             elif 'weight' in name:
                 nn.init.xavier_normal_(param)
-        nn.init.xavier_uniform_(self.att_LN1.weight)
-        nn.init.xavier_uniform_(self.att_LN2.weight)
-        nn.init.xavier_uniform_(self.v1.weight)
-        nn.init.xavier_uniform_(self.v2.weight)
-        nn.init.xavier_uniform_(self.LN1.weight)
-        nn.init.xavier_uniform_(self.LN2.weight)
+        
+        for name, param in self.rnn2.named_parameters():
+            if 'bias' in name:
+                nn.init.constant_(param, 0.0)
+            elif 'weight' in name:
+                nn.init.xavier_normal_(param)
+        
+        for name, param in self.rnn3.named_parameters():
+            if 'bias' in name:
+                nn.init.constant_(param, 0.0)
+            elif 'weight' in name:
+                nn.init.xavier_normal_(param)
+        
+        if self.shared_attention_weight:
+            nn.init.xavier_uniform_(self.att_LN1.weight)
+            nn.init.xavier_uniform_(self.att_LN2.weight)
+            nn.init.xavier_uniform_(self.v1.weight)
+            nn.init.xavier_uniform_(self.v2.weight)
+        else:
+            nn.init.xavier_uniform_(self.att_LN1_s.weight)
+            nn.init.xavier_uniform_(self.v1_s.weight)
+            nn.init.xavier_uniform_(self.att_LN1_t.weight)
+            nn.init.xavier_uniform_(self.v1_t.weight)
+            nn.init.xavier_uniform_(self.att_LN1_o.weight)
+            nn.init.xavier_uniform_(self.v1_o.weight)
+            nn.init.xavier_uniform_(self.att_LN2_t.weight)
+            nn.init.xavier_uniform_(self.v2_t.weight)
+            nn.init.xavier_uniform_(self.att_LN2_o.weight)
+            nn.init.xavier_uniform_(self.v2_o.weight)
+        
         nn.init.xavier_uniform_(self.HLN.weight)
         nn.init.xavier_uniform_(self.CLN.weight)
+        
+        nn.init.xavier_uniform_(self.BClassif1_1.weight)
+        nn.init.xavier_uniform_(self.BClassif1_2.weight)
+        nn.init.xavier_uniform_(self.BClassif1_3.weight)
+        nn.init.xavier_uniform_(self.BClassif1_4.weight)
+        
+        nn.init.xavier_uniform_(self.BClassif2_1.weight)
+        nn.init.xavier_uniform_(self.BClassif2_2.weight)
+        nn.init.xavier_uniform_(self.BClassif2_3.weight)
+        nn.init.xavier_uniform_(self.BClassif2_4.weight)
+        
+        nn.init.xavier_uniform_(self.BClassif3_1.weight)
+        nn.init.xavier_uniform_(self.BClassif3_2.weight)
+        nn.init.xavier_uniform_(self.BClassif3_3.weight)
+        nn.init.xavier_uniform_(self.BClassif3_4.weight)
+        
+        nn.init.xavier_uniform_(self.LN1_1.weight)
+        nn.init.xavier_uniform_(self.LN1_2.weight)
+        
+        nn.init.xavier_uniform_(self.LN2_1.weight)
+        nn.init.xavier_uniform_(self.LN2_2.weight)
+        
+        nn.init.xavier_uniform_(self.LN3_1.weight)
+        nn.init.xavier_uniform_(self.LN3_2.weight)
+        
+        '''for i in range(self.output_categories):
+            nn.init.xavier_uniform_(self.BiClassif1[i].weight)
+            nn.init.xavier_uniform_(self.BiClassif2[i].weight)
+            nn.init.xavier_uniform_(self.BiClassif3[i].weight)
+            nn.init.xavier_uniform_(self.BiClassif4[i].weight)'''
     
-    def clone(self):
-        clone = CsgoModel(self.args)
+    def clone(self, npy_dict):
+        clone = CsgoModel(self.args, npy_dict)
         clone.load_state_dict(self.state_dict())
         if self.is_cuda():
             clone.cuda()

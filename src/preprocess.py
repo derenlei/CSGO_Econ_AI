@@ -18,12 +18,12 @@ def weapon2index(weapon_list):
     for weapon in weapon_list:
         if weapon in weapon_index_dict:
             res.append(weapon_index_dict[weapon])
-        else:
-            if weapon == "Five-Seven":
-                # a misspelled word
-                res.append(weapon_index_dict["Five-SeveN"])
+        # else:
             # else:
             #     w.add(weapon)
+
+    # sort
+    res.sort()
     
     return res
 
@@ -66,6 +66,19 @@ def process_data(data):
                 weapon_start = weapon2index(weapon_start)
                 if round == 1 or round == 16:
                     default_weapons[player_name] = weapon_start
+
+                # save round_freeze_end weapons to seq set
+                # if player["round_freeze_end"]["weapons"] is not None:                
+                #     weapon_freeze_end = player["round_freeze_end"]["weapons"].split(',')
+                #     if player["round_freeze_end"]["has_defuser"]:
+                #         weapon_freeze_end.append("defuser")
+                #     if player["round_freeze_end"]["armor"] > 0:
+                #         if player["round_freeze_end"]["has_helmet"]:
+                #             weapon_freeze_end.append("vesthelm")
+                #         else:
+                #             weapon_freeze_end.append("vest")
+                #     weapon_freeze_end = weapon2index(weapon_freeze_end)
+                #     seq.add(tuple(weapon_freeze_end))
 
                 # store round_end weapons for next round data
                 round_end = player["round_end"]
@@ -161,19 +174,27 @@ def process_data(data):
                 player_data.append(opponents_data)
 
                 # player's purchasing actions
+                pickups = []
+                for _, pickup in player["pickup"].items():
+                    if pickup["price"] is not None and pickup["price"] > 0:
+                        pickups.append(pickup)
+                pickups.sort(key=lambda x: x["timestamp"]) 
+                
                 player_label = []
-                for p in player["pickup"]:
-                    if p["possibly_get_from"] is None:
-                        # currently only consider purchase, no pickup
-                        player_label.append(p)
+                for pickup in pickups:
+                    for weapon in pickup["equip_names"]:
+                        player_label.append(weapon)
+
                 if len(player_label) > 10:
                     # might be a noisy data
                     continue
 
-                player_label.sort(key=lambda x: x["timestamp"])
-                player_label = [x["equip_name"] for x in player_label]
-                player_label.append("End")
                 player_label = weapon2index(player_label)
+                # for l in player_label:
+                #     if l in vocab:
+                #         vocab[l] += 1
+                #     else:
+                #         vocab[l] = 1
                 
                 # add data to result
                 processed_data[player_name].append((player_data, player_label))
@@ -188,6 +209,7 @@ def read_dataset(data_dir):
     # print(processed_dir)
     if os.path.exists(processed_dir):
         dataset = np.load(processed_dir, allow_pickle=True)
+        # dataset = np.load(processed_dir)
         train_set, val_set, test_set = dataset
 
         print("train set: ", len(train_set), end=" ")
@@ -200,15 +222,44 @@ def read_dataset(data_dir):
     with open("./data/weapon_index.json") as f:
         weapon_index_dict = json.load(f)
 
-    data = np.load(data_dir)
+    data = np.load(data_dir, allow_pickle=True)
+    # data = np.load(data_dir)
 
     processed_data = []
+    # seq = set()
+    # vocab = {}
     for match in data:
         match_data = process_data(match) # len == 10
         if match_data is None:
             continue
 
         processed_data.append(match_data)
+
+    # seq = list(seq)
+    # seq.sort(key=lambda x: len(x))
+    # with open("./data/seq.txt", 'w') as f:
+    #     for s in seq:
+    #         # print(s)
+    #         for i in s[:-1]:
+    #             f.write(str(i))
+    #             f.write('\t')
+    #         if len(s) != 0:
+    #             f.write(str(s[-1]))
+    #         f.write('\n')
+
+    # with open("./data/vocab.txt", 'w') as f:
+    #     f.write("0")
+    #     f.write("\n")
+    #     f.write("0")
+    #     f.write("\n")
+    #     f.write("0")
+    #     f.write("\n")
+    #     for i in range(44):
+    #         if i in vocab:
+    #             f.write(str(vocab[i]))
+    #         else:
+    #             f.write("0")
+    #         f.write("\n")
 
     random.seed(4164)
     random.shuffle(processed_data)
