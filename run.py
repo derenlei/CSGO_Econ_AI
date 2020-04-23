@@ -33,10 +33,9 @@ def get_optimizer(args, model, state=None):
 def evaluation(model, optimizer, k_shot, val_set, npy_dict, gate):
     losses = []
     accuracies = []
+    accuracies_type = []
     bi_accuracies = []
     ecos = []
-    seq_losses = []
-    bi_losses= []
     #model.eval()
     for i in tqdm(range(len(val_set))):
         val_data_current = val_set[i]
@@ -45,7 +44,7 @@ def evaluation(model, optimizer, k_shot, val_set, npy_dict, gate):
             continue
         # model.eval()
         model_insight = model.clone(npy_dict)
-        model_insight.eval()
+#         model_insight.eval()
         for iteration in range(k_shot):
             # Sample minibatch
             data = val_data_current[:,iteration, 0].tolist()
@@ -61,46 +60,35 @@ def evaluation(model, optimizer, k_shot, val_set, npy_dict, gate):
             optimizer.step()
             
         # target set
-        target_loss = list()
         target_acc = list()
+        target_acc_type = list()
         target_eco = list()
         target_bi_acc = list()
-        # for Tensorboard
-        target_seq_loss = list()
-        target_bi_loss = list()
+
         for iteration in range(k_shot, len(val_data_current[0])):
 #             data, labels = val_data_current[iteration]
             data = val_data_current[:,iteration, 0].tolist()
             labels = val_data_current[:, iteration, 1].tolist()
             prediction = model_insight.forward(data)
-            loss_dict = model_insight.loss(prediction, labels)
-            loss = loss_dict['model_loss']
-            target_loss.append(loss.unsqueeze(0).detach())
-            
+
             # get batch_sized accuracy
-            #for i in len(prediction[0][i]:
-            accuracy = get_batched_acc(prediction[0], labels)                  
+            accuracy = get_batched_acc(prediction[0], labels)
+            accuracy_type = get_batched_acc_type(prediction[0], labels, model_insight.id2type)
             binary_accuracy = get_batched_binary_acc(prediction[3], labels, model_insight.id2type)
             money_start = [d[2][0] * money_scaling for d in data]
             eco_diff = get_batched_finance_diff(prediction[0], labels, money_start, action_money)
             target_acc.append(accuracy)
+            target_acc_type.append(accuracy_type)
             target_eco.append(eco_diff)
             target_bi_acc.append(binary_accuracy)
-            
-            target_seq_loss.append(loss_dict['seq_loss'])
-            target_bi_loss.append(loss_dict['bi_loss'])
-
-        target_loss = torch.cat(target_loss, -1)
-        losses.append(torch.mean(target_loss).unsqueeze(0))
+  
         accuracies.append(np.mean(target_acc))
+        accuracies_type.append(np.mean(target_acc_type, axis=0))
+        
         ecos.append(np.mean(target_eco))
         bi_accuracies.append(np.mean(target_bi_acc, axis=0))
         
-        seq_losses.append(np.mean(target_seq_loss, axis=0))
-        bi_losses.append(np.mean(target_bi_loss, axis=0))
-        
-    losses = torch.cat(losses, -1)
-    return np.nanmean(seq_losses, axis=0), np.mean(bi_losses, axis=0), np.mean(accuracies), np.mean(ecos), np.mean(bi_accuracies, axis=0)    
+    return np.mean(accuracies), np.mean(accuracies_type, axis=0), np.mean(ecos), np.mean(bi_accuracies, axis=0)   
         
 def insight_learning(model_insight, optimizer, k_shot, train_data_current, gate):
    
@@ -137,6 +125,9 @@ def insight_learning(model_insight, optimizer, k_shot, train_data_current, gate)
     # target set
     target_loss = list()
     target_acc = list()
+    target_acc_gun = list()
+    target_acc_grenade = list()
+    target_acc_equip = list()
     target_eco = list()
     target_bi_acc = list()
     # for Tensorboard
@@ -154,6 +145,7 @@ def insight_learning(model_insight, optimizer, k_shot, train_data_current, gate)
         loss = loss_dict['model_loss']
         target_loss.append(loss.unsqueeze(0).double())
         accuracy = get_batched_acc(prediction[0], labels)
+        acc_type = get_batched_acc_type(prediction[0], labels, model_insight.id2type)
         binary_accuracy = get_batched_binary_acc(prediction[3], labels, model_insight.id2type)
         '''print('-----iteration ', iteration)
         print(get_category_label(labels, model_insight.id2type))
@@ -162,6 +154,9 @@ def insight_learning(model_insight, optimizer, k_shot, train_data_current, gate)
         money_start = [d[2][0] * money_scaling for d in data]
         eco_diff = get_batched_finance_diff(prediction[0], labels, money_start, action_money)
         target_acc.append(accuracy)
+        target_acc_gun.append(acc_type[0])
+        target_acc_grenade.append(acc_type[1])
+        target_acc_equip.append(acc_type[2])
         target_eco.append(eco_diff)
         target_bi_acc.append(binary_accuracy)
         
@@ -175,6 +170,9 @@ def insight_learning(model_insight, optimizer, k_shot, train_data_current, gate)
     target_loss = torch.cat(target_loss, -1)
     loss = torch.mean(target_loss)
     accuracy = np.mean(target_acc)
+    acc_gun = np.mean(target_acc_gun)
+    acc_grenade = np.mean(target_acc_grenade)
+    acc_equip = np.mean(target_acc_equip)
     eco = np.mean(target_eco)
     bi_accuracy = np.mean(target_bi_acc, axis=0)
     optimizer.zero_grad()
@@ -184,7 +182,7 @@ def insight_learning(model_insight, optimizer, k_shot, train_data_current, gate)
 #     print("seq_loss:", target_seq_loss)
 #     print("bi_loss:", target_bi_loss)
 
-    return np.nanmean(target_seq_loss, axis=0), np.mean(target_bi_loss, axis=0), accuracy, eco, bi_accuracy
+    return np.nanmean(target_seq_loss, axis=0), np.mean(target_bi_loss, axis=0), accuracy, acc_gun, acc_grenade, acc_equip, eco, bi_accuracy
 
         
 def main():
@@ -196,14 +194,14 @@ def main():
     parser = argparse.ArgumentParser('Train MAML on CSGO')
     # params
     parser.add_argument('--logdir', default='log/', type=str, help='Folder to store everything/load')
-    parser.add_argument('--statedir', default='emb2_attn2_category_batch_debug', type=str, help='Folder name to store model state')
+    parser.add_argument('--statedir', default='emb2_attn2_category_batch_a', type=str, help='Folder name to store model state')
     parser.add_argument('--player_mode', default='terrorist', type=str, help='terrorist or counter_terrorist')
     parser.add_argument('--shots', default=5, type=int, help='shots per class (K-shot)')
     parser.add_argument('--start_meta_iteration', default=0, type=int, help='start number of meta iterations')
     parser.add_argument('--meta_iterations', default=30000, type=int, help='number of meta iterations')
     parser.add_argument('--meta_lr', default=0.1, type=float, help='meta learning rate')
     parser.add_argument('--lr', default=5e-4, type=float, help='base learning rate')
-    parser.add_argument('--validate_every', default=1000, type=int, help='validate every')
+    parser.add_argument('--validate_every', default=670, type=int, help='validate every')
     parser.add_argument('--check_every', default=500, type=int, help='Checkpoint every')
     parser.add_argument('--checkpoint', default='log/checkpoint', help='Path to checkpoint. This works only if starting fresh (i.e., no checkpoints in logdir)')
     parser.add_argument('--action_embedding', default = '/home/derenlei/MAML/data/action_embedding2.npy', help = 'Path to action embedding.')
@@ -326,7 +324,7 @@ def main():
     #####################
     
     # Meta Train
-    train_seq_loss, train_bi_loss, train_accuracy, train_eco, train_bi_accuracy = [], [], [], [], []
+    train_seq_loss, train_bi_loss, train_accuracy, train_acc_gun, train_acc_grenade, train_acc_equip, train_eco, train_bi_accuracy = [], [], [], [], [], [], [], []
     for meta_iteration in tqdm(range(args.start_meta_iteration, args.meta_iterations)):
         #print('meta_iteration: ', meta_iteration)
         train_data_current = random.choice(train_set)
@@ -346,7 +344,7 @@ def main():
         gate = meta_iteration >= 2000
         #gate = True
         
-        seq_loss, bi_loss, accuracy, eco, bi_accuracy = insight_learning(model_insight, optimizer, args.shots, train_data_current, gate) # TODO
+        seq_loss, bi_loss, accuracy, acc_gun, acc_grenade, acc_equip, eco, bi_accuracy = insight_learning(model_insight, optimizer, args.shots, train_data_current, gate) # TODO
         state = optimizer.state_dict()  # save optimizer state
 
         # Update slow net
@@ -359,6 +357,9 @@ def main():
         train_seq_loss.append(seq_loss)
         train_bi_loss.append(bi_loss)
         train_accuracy.append(accuracy)
+        train_acc_gun.append(acc_gun)        
+        train_acc_grenade.append(acc_grenade)
+        train_acc_equip.append(acc_equip)
         train_eco.append(eco)
         train_bi_accuracy.append(bi_accuracy)
         
@@ -383,6 +384,9 @@ def main():
             logger.add_scalar('bi_loss_equip', bi_loss_mean[2], meta_iteration)
             
             logger.add_scalar('accuracy', sum(train_accuracy)/(len(train_accuracy)*1.0), meta_iteration)
+            logger.add_scalar('accuracy_gun', sum(train_acc_gun)/(len(train_acc_gun)*1.0), meta_iteration)
+            logger.add_scalar('accuracy_grenade', sum(train_acc_grenade)/(len(train_acc_grenade)*1.0), meta_iteration)
+            logger.add_scalar('accuracy_equip', sum(train_acc_equip)/(len(train_acc_equip)*1.0), meta_iteration)
             logger.add_scalar('Eco_diff', sum(train_eco)/(len(train_eco)*1.0), meta_iteration)
             
             bi_acc_mean = np.mean(train_bi_accuracy, axis=0)
@@ -402,7 +406,7 @@ def main():
             optimizer = get_optimizer(args, model_insight, state)
 
             # Update insight model
-            eval_seq_loss, eval_bi_loss, eval_accuracy, eval_eco, eval_bi_accuracy = evaluation(model_insight, optimizer, args.shots, val_set, npy_dict, gate) # TODO
+            eval_seq_loss, eval_bi_loss, eval_accuracy, eval_acc_gun, eval_acc_grenade, eval_acc_equip, eval_eco, eval_bi_accuracy = evaluation(model_insight, optimizer, args.shots, val_set, npy_dict, gate) # TODO
             state = optimizer.state_dict()  # save optimizer state            
             
             # save log
@@ -422,8 +426,10 @@ def main():
             logger.add_scalar('val_bi_loss_grenade', eval_bi_loss[1], meta_iteration) 
             logger.add_scalar('val_bi_loss_equip', eval_bi_loss[2], meta_iteration)
             
-            logger.add_scalar('val_loss', eval_loss, meta_iteration)
             logger.add_scalar('val_accuracy', eval_accuracy, meta_iteration) 
+            logger.add_scalar('val_accuracy_gun', eval_acc_gun, meta_iteration) 
+            logger.add_scalar('val_accuracy_grenade', eval_acc_grenade, meta_iteration) 
+            logger.add_scalar('val_accuracy_equip', eval_acc_equip, meta_iteration) 
             logger.add_scalar('val_eco_diff', eval_eco, meta_iteration)
             
             logger.add_scalar('val_binary_acc_gun', eval_bi_accuracy[0], meta_iteration) 

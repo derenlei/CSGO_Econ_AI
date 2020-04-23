@@ -75,11 +75,11 @@ class CsgoModel(ReptileModel):
         
         
         self.category_offset = [0, int((self.id2type<=5).sum()), int((self.id2type<=6).sum())]
-        self.category_action_offset = []
+        self.category_action_offset = []  # lstm dist id -> action id
         self.output_dim1 = self.category_offset[1] + 1
         self.output_dim2 = self.category_offset[2] - self.category_offset[1] + 1
         self.output_dim3 = self.output_dim - self.category_offset[2]
-        #self.output_dims = [self.output_dim1, self.output_dim2, self.output_dim3]
+        self.output_dims = [self.output_dim1, self.output_dim2, self.output_dim3]
         assert self.output_dim == self.output_dim1 + self.output_dim2 + self.output_dim3 - 2
         self.category_action_offset.append(list(np.arange(self.output_dim1 - 1)) + [self.end_idx])
         self.category_action_offset.append(list(np.arange(self.output_dim2 - 1) + self.category_offset[1]) + [self.end_idx])
@@ -119,7 +119,9 @@ class CsgoModel(ReptileModel):
         self.ff_dim = args.ff_dim
         self.resource_dim = args.resource_dim
         self.team_dim = 4
+#         self.team_dim = 2  # no round score info
         self.input_dim = (self.embedding_dim + self.resource_dim) * 3 + self.team_dim
+#         self.input_dim = (self.embedding_dim + self.resource_dim) * 2 + self.team_dim  # no teammate
         
         self.ff_dropout_rate = args.ff_dropout_rate
         self.max_output_num = args.max_output_num
@@ -170,9 +172,6 @@ class CsgoModel(ReptileModel):
                 raise ValueError('Unrecognized baseline function: {}'.format(self.baseline))
             stabled_r = stabled_r_2D.view(-1)
             return stabled_r
-
-        # TODO: batch
-        # x, money, gs_actions = self.format_batch(mini_batch, num_tiles=self.num_rollouts)
         
         action_list, greedy_list, action_prob_by_category, no_output_bi, bi_prob, action_list_by_category, greedy_list_by_category = predictions
         
@@ -227,7 +226,7 @@ class CsgoModel(ReptileModel):
         #pg_loss = -final_reward * torch.sum(log_action_probs)
         # LSTM loss
         seq_loss_print = []
-        seq_loss = 0.0
+        seq_loss = torch.tensor(0.0).cuda()
         # label_by_category = utils.filter_category_actions(labels, self.id2type, self.output_categories)
         label_by_batch = utils.filter_batched_category_actions(labels, self.id2type, self.output_categories)
         
@@ -310,7 +309,7 @@ class CsgoModel(ReptileModel):
         #pt_loss = -final_reward * torch.sum(torch.exp(log_action_probs))
         
         loss_dict = {}
-        loss_dict['model_loss'] = seq_loss + bi_loss
+        loss_dict['model_loss'] = seq_loss.double() + bi_loss.double()
         '''if torch.isnan(loss_dict['model_loss']):
             print(debug_loss)
             assert 1==0'''
@@ -349,6 +348,7 @@ class CsgoModel(ReptileModel):
         elif side == 'o':
             h = self.v2_o(h)
         att = F.softmax(h, 0)
+#         print("high att:", att.detach().cpu().numpy().tolist())
         ret = torch.sum(att * x, 0)
         return ret
         
@@ -448,16 +448,19 @@ class CsgoModel(ReptileModel):
             residual_capacity[key] -= value
         return residual_capacity
     
-    def get_capacity_mask(self, res_action_capacity, mute_mask):
+    def get_capacity_mask(self, res_capacity, mute_mask):
         # is_mute = (torch.tensor(res_action_capacity) == 0).float().cuda()
-        ret = []
-        for j in range(len(res_action_capacity)):
-            mask = torch.ones(mute_mask.size()[1]).cuda()
-            for i, res_cap in enumerate(res_action_capacity[j]):
-                if res_cap == 0:
-                    mask *= mute_mask[i]
-            ret.append(mask.unsqueeze(0))
-        return torch.cat(ret, 0)
+#         ret = []
+#         for j in range(len(res_action_capacity)):
+#             mask = torch.ones(mute_mask.size()[1]).cuda()
+#             for i, res_cap in enumerate(res_action_capacity[j]):
+#                 if res_cap == 0:
+#                     mask *= mute_mask[i]
+#             ret.append(mask.unsqueeze(0))
+#         return torch.cat(ret, 0)
+        to_multiply_mask = 1 - (res_capacity > 0).float()
+        ret = (torch.mm(to_multiply_mask, mute_mask) == torch.sum(to_multiply_mask, 1).unsqueeze(1)).float()
+        return ret
         
     
     def forward(self, data, gate=True):
@@ -488,6 +491,7 @@ class CsgoModel(ReptileModel):
                     hti = self.low_att(self.get_embedding(xti), 't')
                 hti = torch.cat([hti, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
                 ht.append(hti.unsqueeze(0))
+                
             ht = torch.cat(ht, 0)
             if self.shared_attention_weight:
                 ht = self.high_att(ht)
@@ -503,6 +507,7 @@ class CsgoModel(ReptileModel):
                     hoi = self.low_att(self.get_embedding(xoi), 'o')
                 hoi = torch.cat([hoi, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
                 ho.append(hoi.unsqueeze(0))
+
             ho = torch.cat(ho, 0)
             if self.shared_attention_weight:
                 ho = self.high_att(ho)
@@ -518,9 +523,11 @@ class CsgoModel(ReptileModel):
 
             # concat representations
             hb = torch.cat([hs, ht, ho], -1)
+#             hb = torch.cat([hs, ho], -1)  # no teammate
 
             # incorporate team information
             hb = torch.cat([hb, self.side_embedding[side[0]], torch.tensor(score).cuda()], -1)
+#             hb = torch.cat([hb, self.side_embedding[side[0]]], -1) # no round score info
             
             h.append(hb.unsqueeze(0))
         
@@ -637,6 +644,7 @@ class CsgoModel(ReptileModel):
             action_prob_category = []
             action_list_category = []
             is_end = no_output_bi[:, j].float()
+                        
             for i in range(self.max_output_num):
                 if torch.sum(is_end) == len(is_end):
                     for _ in range(self.max_output_num - i):
@@ -654,7 +662,8 @@ class CsgoModel(ReptileModel):
 
                 action_mask = self.money_mask(money.unsqueeze(1)) * self.side_mask[side_all]
                 #action_mask *= self.category_mask[j]
-                action_mask *= self.get_capacity_mask(res_action_capacity, self.mute_action_mask)
+                #action_mask *= self.get_capacity_mask(res_action_capacity, self.mute_action_mask)
+                action_mask *= (res_action_capacity > 0).float()
                 action_mask *= self.get_capacity_mask(res_type_capacity, self.mute_type_mask)
                 action_mask = action_mask[:, self.category_action_offset[j]]
                 action_dist = action_dist * action_mask # + (1 - action_mask) * EPSILON
@@ -805,7 +814,8 @@ class CsgoModel(ReptileModel):
 
                 action_mask = self.money_mask(money.unsqueeze(1)) * self.side_mask[side_all]
                 #action_mask *= self.category_mask[j]
-                action_mask *= self.get_capacity_mask(res_action_capacity, self.mute_action_mask)
+                #action_mask *= self.get_capacity_mask(res_action_capacity, self.mute_action_mask)
+                action_mask *= (res_action_capacity > 0).float()
                 action_mask *= self.get_capacity_mask(res_type_capacity, self.mute_type_mask)
                 action_mask = action_mask[:, self.category_action_offset[j]]
                 action_dist = action_dist * action_mask # + (1 - action_mask) * EPSILON
@@ -946,7 +956,7 @@ class CsgoModel(ReptileModel):
         print()
     
     
-    def predict(self, data):
+    def predict(self, data, gate=True):
         '''
         x: input
         '''
@@ -956,118 +966,183 @@ class CsgoModel(ReptileModel):
         x_s: num_weapon #(num_batch, num_shot, num_weapon)
         x_t, x_o: (num_player, num_weapon) #(num_batch, num_shot, num_player, num_weapon)
         '''
+        batch_size = len(data)
+        h = []
+        money_all = []
+        x_s_all = []
+        side_all = []      
         
-        side, x_s, money_s, perf_s, score, x_t, x_o = data
-        # represent allies
-        ht = []
-        for xti, moneyi, perfi in x_t:
+        for db in data:
+            side, x_s, money_s, perf_s, score, x_t, x_o = db
+            money_all.append(money_s[0])
+            x_s_all.append(x_s)
+            side_all.append(side[0])
+            # represent allies
+            ht = []
+            for xti, moneyi, perfi in x_t:
+                if self.shared_attention_weight:
+                    hti = self.low_att(self.get_embedding(xti))
+                else:
+                    hti = self.low_att(self.get_embedding(xti), 't')
+                hti = torch.cat([hti, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
+                ht.append(hti.unsqueeze(0))
+            ht = torch.cat(ht, 0)
             if self.shared_attention_weight:
-                hti = self.low_att(self.get_embedding(xti))
+                ht = self.high_att(ht)
             else:
-                hti = self.low_att(self.get_embedding(xti), 't')
-            hti = torch.cat([hti, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
-            ht.append(hti.unsqueeze(0))
-        ht = torch.cat(ht, 0)
-        if self.shared_attention_weight:
-            ht = self.high_att(ht)
-        else:
-            ht = self.high_att(ht, 't')
+                ht = self.high_att(ht, 't')
         
-        # represent enemies
-        ho = []
-        for xoi, moneyi, perfi in x_o:
+            # represent enemies
+            ho = []
+            for xoi, moneyi, perfi in x_o:
+                if self.shared_attention_weight:
+                    hoi = self.low_att(self.get_embedding(xoi))
+                else:
+                    hoi = self.low_att(self.get_embedding(xoi), 'o')
+                hoi = torch.cat([hoi, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
+                ho.append(hoi.unsqueeze(0))
+            ho = torch.cat(ho, 0)
             if self.shared_attention_weight:
-                hoi = self.low_att(self.get_embedding(xoi))
+                ho = self.high_att(ho)
             else:
-                hoi = self.low_att(self.get_embedding(xoi), 'o')
-            hoi = torch.cat([hoi, torch.tensor(moneyi).cuda(), torch.tensor(perfi).cuda()], -1)
-            ho.append(hoi.unsqueeze(0))
-        ho = torch.cat(ho, 0)
-        if self.shared_attention_weight:
-            ho = self.high_att(ho)
-        else:
-            ho = self.high_att(ho, 'o')
+                ho = self.high_att(ho, 'o')
         
-        # represent self
-        if self.shared_attention_weight:
-            hs = self.low_att(self.get_embedding(x_s))
-        else:
-            hs = self.low_att(self.get_embedding(x_s), 's')
-        hs = torch.cat([hs, torch.tensor(money_s).cuda(), torch.tensor(perf_s).cuda()], -1)
+            # represent self
+            if self.shared_attention_weight:
+                hs = self.low_att(self.get_embedding(x_s))
+            else:
+                hs = self.low_att(self.get_embedding(x_s), 's')
+            hs = torch.cat([hs, torch.tensor(money_s).cuda(), torch.tensor(perf_s).cuda()], -1)
         
         
-        # concat representations
-        h = torch.cat([hs, ht, ho], -1)
+            # concat representations
+            hb = torch.cat([hs, ht, ho], -1)
         
-        # incorporate team information
-        h = torch.cat([h, self.side_embedding[side[0]], torch.tensor(score).cuda()], -1)
+            # incorporate team information
+            hb = torch.cat([hb, self.side_embedding[side[0]], torch.tensor(score).cuda()], -1)
+            
+            h.append(hb.unsqueeze(0))
+           
+        h = torch.cat(h, 0)
+        assert h.size()[0] == batch_size
+        
+        # seperate binary classifier
+        bi_prob = []
+        no_output_bi = []
+        for i in range(self.output_categories):
+            h_bi = self.BiClassif(h.detach(), i)
+            bi_prob.append(h_bi.unsqueeze(1))
+            no_output_bi.append((h_bi[:, 0] > h_bi[:, 1]).unsqueeze(1))
+        bi_prob = torch.cat(bi_prob, 1)
+        no_output_bi = torch.cat(no_output_bi, 1)
         
         # return values - predictions and probabilities
-        action_list = []
-        action_prob = []
-        
-        # initialize lstm
-        init_action = self.start_idx
-        self.initialize_lstm(h, init_action)
-        
-        log_action_prob = torch.zeros(1).cuda()
-        finished = torch.zeros(1).cuda()
-        
-        action_list = torch.tensor([self.start_idx]).unsqueeze(0).cuda()
+        action_list = None
         
         # resource left
-        money_s = torch.tensor(money_s).cuda() * money_scaling
-        res_action_capacity = torch.tensor(self.get_residual_capacity(x_s, self.action_capacity)).unsqueeze(0).cuda()
-        res_type_capacity = torch.tensor(self.get_residual_capacity(self.id2type[x_s], self.type_capacity)).unsqueeze(0).cuda()
+        money = torch.tensor(money_all).cuda() * self.money_scaling
+        res_action_capacity = []
+        res_type_capacity = []
+        for x_s in x_s_all:
+            res_action_capacity.append(self.get_residual_capacity(x_s, self.action_capacity)) 
+            res_type_capacity.append(self.get_residual_capacity(self.id2type[x_s], self.type_capacity))
+        res_action_capacity = torch.tensor(res_action_capacity).cuda()
+        res_type_capacity = torch.tensor(res_type_capacity).cuda()
         
-        # generate predictions
-        for i in range(self.max_output_num):
-            H = self.history[-1][0][-1, :, :]
-            action_dist = self.classif_LN(H)
-            action_mask = self.money_mask(money.view(-1, 1)) * self.action_mask * self.side_mask[side[0]]
-            action_mask *= self.get_capacity_mask(res_action_capacity, self.mute_action_mask)
-            action_mask *= self.get_capacity_mask(res_type_capacity, self.mute_type_mask)
-            # is_zero = (torch.sum(r_prob_b, 1) == 0).float().unsqueeze(1)
-            action_dist = action_dist * action_mask # + (1 - action_mask) * EPSILON
-            end_mask = torch.zeros(self.output_dim).cuda()
-            end_mask[self.end_idx] = 1.0
-            action_dist = action_dist * (1 - finished).view(-1, 1) + finished.view(-1, 1) * end_mask
-            
-            
-            log_action_dist = log_action_prob.view(-1, 1) + torch.log(action_dist + EPSILON)
-            assert log_action_dist.size()[1] == self.output_dim
-            last_k = len(log_action_dist)
-            log_action_dist = log_action_dist.view(1, -1)
-            
-            k = min(self.beam_size, log_action_dist.size()[1])
-            log_action_prob, action_ind = torch.topk(log_action_dist, k)
-            action_idx = action_ind % self.output_dim
-            action_offset = action_ind / self.output_dim
-            action_list = torch.cat([action_list[action_offset].view(k, -1), action_idx.view(-1, 1)], 1)
-            #print(action_list[0])
-            
-            self.update_lstm(action_idx, offset = action_offset)
-            money = money[action_offset].view(k)
-            money = money - self.prices[action_idx].view(-1)
-            res_action_capacity = res_action_capacity[action_offset].view(k, -1)
-            res_action_capacity -= torch.eye(self.output_dim).cuda()[action_offset.view(-1)]
-            res_type_capacity = res_type_capacity[action_offset].view(k, -1)
-            res_type_capacity -= torch.eye(self.output_dim).cuda()[action_offset.view(-1)]
-            
-            finished = (action_idx == self.end_idx).float()
-            if action_idx.view(-1)[0].item() == self.end_idx:
-                break
-            # xs = torch.cat([xs.unsqueeze(0), self.get_embedding(out_id).unsqueeze(0)], 0)
         
-        pred = action_list[0][1:]
-        #print(action_list)
-        #print(pred)
-        actions = []
-        for elem in pred:
-            if elem == self.end_idx:
-                break
-            actions.append(elem)
-        return actions, log_action_prob
+        # transform representation to initialize (h, c)
+        init_h = self.HLN(h).view(self.history_num_layers, batch_size, self.history_dim)
+        init_c = self.CLN(h).view(self.history_num_layers, batch_size, self.history_dim)
+        side_all = torch.tensor(side_all).cuda()
+        
+        # beam search 
+        log_action_prob = torch.zeros(1).cuda()
+        k = 1
+        for j in range(self.output_categories):
+#             print('category {}'.format(j))
+            # initialize LSTM
+            init_action = [self.start_idx] * batch_size * k
+            init_embedding = self.get_embedding(init_action).unsqueeze(1)
+            init_h_tile = utils.tile_along_beam(init_h, k, 1)
+            init_c_tile = utils.tile_along_beam(init_c, k, 1)
+            self.initialize_lstm(init_embedding, (init_h_tile, init_c_tile), j)
+            # TODO: is_end tile: (batch_size,) - > (batch_size * last_k)
+            is_end = utils.tile_along_beam(no_output_bi[:, j].float(), k, -1)
+            
+            
+            for i in range(self.max_output_num):
+#                 print(f'generate action {i}')
+                if torch.sum(is_end) == len(is_end):
+                    for _ in range(self.max_output_num - i):
+                        if action_list is not None:
+                            action_list = torch.cat([action_list, torch.ones(batch_size * k, 1).long().cuda() * self.end_idx], dim=1)
+                        else:
+                            action_list = torch.ones(batch_size * k, 1).long().cuda() * self.end_idx
+                    break
+                    
+                H = self.history[-1][0][-1, :, :]
+                action_dist = self.classif_LN(H, j)
+                
+                side_all = utils.tile_along_beam(side_all.view(batch_size, -1)[:, 0], k, 0)
+                action_mask = self.money_mask(money.unsqueeze(1)) * self.side_mask[side_all]
+                #action_mask *= self.get_capacity_mask(res_action_capacity, self.mute_action_mask)
+                action_mask *= (res_action_capacity > 0).float()
+                action_mask *= self.get_capacity_mask(res_type_capacity, self.mute_type_mask)
+                action_mask = action_mask[:, self.category_action_offset[j]]
+                action_dist = action_dist * action_mask
+                
+                mask_all_tensor = torch.zeros(action_dist.size()[1], dtype = torch.float).cuda()
+                mask_all_tensor[-1] = 1.0
+
+                action_dist = (1 - is_end.unsqueeze(1)) * action_dist + is_end.unsqueeze(1) * mask_all_tensor
+                    
+                log_action_dist = log_action_prob.view(-1, 1) + torch.log(action_dist)
+                assert log_action_dist.size()[1] == self.output_dims[j]
+                log_action_dist = log_action_dist.view(batch_size, -1)
+                
+                last_k = k
+                k = min(self.beam_size, log_action_dist.size()[1])
+                k = 1
+                log_action_prob, action_ind = torch.topk(log_action_dist, k)
+                action_offset = (action_ind / self.output_dims[j] + torch.arange(batch_size).unsqueeze(1).cuda() * last_k).view(-1)
+                # beiieb
+
+                output_idx = action_ind % self.output_dims[j]
+                action_idx = torch.tensor(self.category_action_offset[j]).cuda()[output_idx].view(-1)
+                
+                is_end = (action_idx == self.end_idx).view(-1).float()
+                
+                # TODO: update action_list, hidden_state
+                if action_list is not None:
+                    action_list = torch.cat([action_list[action_offset], action_idx.view(-1, 1)], dim=1)
+                else:
+                    action_list = action_idx.view(-1, 1)
+                
+                self.update_lstm(action_idx, j, offset=action_offset)
+                
+                money = money[action_offset] - self.prices[action_idx]
+                res_action_capacity = res_action_capacity[action_offset]
+                res_action_capacity -= torch.eye(res_action_capacity.size()[1]).cuda()[action_idx]
+                res_type_capacity = res_type_capacity[action_offset]
+                res_type_capacity -= torch.eye(res_type_capacity.size()[1]).cuda()[torch.tensor(self.id2type).cuda()[action_idx]]
+                
+                '''assert torch.sum((money >= 0).float()) == batch_size * k
+                assert torch.sum((res_action_capacity >= 0).float()) == len(res_action_capacity.view(-1))
+                assert torch.sum((res_type_capacity >= 0).float()) == len(res_type_capacity.view(-1))'''
+                
+            
+            # TODO: outer greedy, inner beam search
+            '''money = money.view(batch_size, -1)[:, 0]
+            res_action_capacity = res_action_capacity.view(batch_size, -1, res_action_capacity.size()[1])[:, 0, :]
+            res_type_capacity = res_type_capacity.view(batch_size, -1, res_type_capacity.size()[1])[:, 0, :]'''
+            
+        #action_list = torch.cat(action_list, 1).cpu().numpy().tolist()
+        assert len(action_list) == batch_size * k
+        action_list = action_list.view(batch_size, k, -1)[:, 0].cpu().numpy().tolist()
+        action_list = utils.remove_token(action_list, self.end_idx)
+        action_log_prob = log_action_prob.view(batch_size, k)[:, -1].cpu().detach().numpy().tolist()
+
+        return action_list, action_log_prob, no_output_bi.cpu().numpy().tolist()
         
     
     def define_modules(self):
@@ -1297,6 +1372,31 @@ class CsgoModel(ReptileModel):
         return clone
 
 if __name__ == '__main__':
+    def get_capacity_mask(res_capacity, mute_mask):
+        # is_mute = (torch.tensor(res_action_capacity) == 0).float().cuda()
+#         ret = []
+#         for j in range(len(res_action_capacity)):
+#             mask = torch.ones(mute_mask.size()[1]).cuda()
+#             for i, res_cap in enumerate(res_action_capacity[j]):
+#                 if res_cap == 0:
+#                     mask *= mute_mask[i]
+#             ret.append(mask.unsqueeze(0))
+#         return torch.cat(ret, 0)
+        to_multiply_mask = 1 - (res_capacity > 0).float()
+        ret = (torch.mm(to_multiply_mask, mute_mask) == torch.sum(to_multiply_mask, 1).unsqueeze(1)).float()
+        return ret
+    mute_type_mask = torch.tensor([[0,0,1,1,1,1,1,1],[1,1,0,0,1,1,1,1],[1,1,1,1,0,0,1,1],[1,1,1,1,1,1,0,0]]).float()
+    res_type_capacity = torch.randint(20,(3, 4)) - 10
+    print("mask:")
+    print(mute_type_mask)
+    print("capacity:")
+    print( (res_type_capacity>0).float())
+    
+    action_mask = get_capacity_mask(res_type_capacity, mute_type_mask)
+    print(action_mask)
+    assert 1 == 0
+    
+    
     # Parsing
     parser = argparse.ArgumentParser('Train MAML on CSGO')
     # params

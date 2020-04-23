@@ -1,10 +1,28 @@
 import os
 from collections import Counter
 import numpy as np
+import torch
 import re
 
 EPSILON = float(np.finfo(float).eps)
 
+def tile_along_beam(v, beam_size, dim=0):
+    """
+    Tile a tensor along a specified dimension for the specified beam size.
+    :param v: Input tensor.
+    :param beam_size: Beam size.
+    """
+    if dim == -1:
+        dim = len(v.size()) - 1
+    v = v.unsqueeze(dim + 1)
+    v = torch.cat([v] * beam_size, dim=dim + 1)
+    new_size = []
+    for i, d in enumerate(v.size()):
+        if i == dim + 1:
+            new_size[-1] *= d
+        else:
+            new_size.append(d)
+    return v.view(new_size)
 
 def remove_token(a, token_id):
     res = []
@@ -13,6 +31,40 @@ def remove_token(a, token_id):
         res.append(res_i)
     
     return res
+
+def get_batched_acc_type(a, a_r, action_type):
+    ret = None
+    if len(a) > 0 and isinstance(a[0],list):
+        accuracy = [[], [], []]
+        for i in range(len(a)):
+            accuracy_type = get_acc_type(a[i], a_r[i], action_type)
+            accuracy[0].append(accuracy_type[0])
+            accuracy[1].append(accuracy_type[1])
+            accuracy[2].append(accuracy_type[2])
+        ret = [np.mean(accuracy[0], 0), np.mean(accuracy[1], 0), np.mean(accuracy[2], 0)]
+    else:
+        ret = get_acc_type(a, a_r, action_type)
+    return ret
+
+def get_acc_type(a, a_r, action_type):
+    a_type = split_by_type(a, action_type)
+    a_r_type = split_by_type(a_r, action_type)
+    
+    return [get_accuracy(a_type[0], a_r_type[0]), get_accuracy(a_type[1], a_r_type[1]), get_accuracy(a_type[2], a_r_type[2])]
+
+def split_by_type(a, action_type):
+    ret = [[], [], []]
+    for action in a:
+        if action_type[action] == 0: # pistols
+            ret[0].append(action)
+        elif 1 <= action_type[action] <= 5: # primary guns
+            ret[0].append(action)
+        elif action_type[action] == 6: # grenades
+            ret[1].append(action)
+        else: # equipment
+            ret[2].append(action)
+    return ret
+
 
 def get_batched_acc(a,a_r):
     # check input type
