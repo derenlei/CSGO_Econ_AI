@@ -3,6 +3,7 @@ import json
 import numpy as np
 import os
 import random
+from tqdm import tqdm
 
 RATIO1 = 0.8
 RATIO2 = 0.9
@@ -31,22 +32,27 @@ def process_data(data):
     # data for each player (10 in total)
     processed_data = {} # [data, label]
 
-    prev_opponent_weapons = {}
-    default_weapons = {}
-
-    for round in range(1, 31):
-        # print(round)
+    prev_round_score = {}
+    for round in range(2, 31):
+#         print(round)
         if str(round) not in data:
+            if round == 2:
+                return None
             break
 
-        round_end_weapons = {}
+        if round != 2 and len(processed_data) != 10:
+            return None
+
+        round_valid = True
+        round_data = {}
+        
 
         teams = data[str(round)]["teams"]
         for _, team in teams.items():
             players = team["players"]
             for _, player in players.items():
                 player_name = player["player_name"]
-                if round == 1:
+                if round == 2:
                     processed_data[player_name] = []
 
                 if player["team_number"] is None:
@@ -55,6 +61,9 @@ def process_data(data):
                 is_terrorist = int(player["team_number"]) == 2
 
                 round_start = player["round_start"]
+                if round_start["weapons"] is None:
+                    round_valid = False
+                    continue
                 weapon_start = round_start["weapons"].split(',')
                 if round_start["has_defuser"]:
                     weapon_start.append("defuser")
@@ -64,8 +73,6 @@ def process_data(data):
                     else:
                         weapon_start.append("vest")
                 weapon_start = weapon2index(weapon_start)
-                if round == 1 or round == 16:
-                    default_weapons[player_name] = weapon_start
 
                 # save round_freeze_end weapons to seq set
                 # if player["round_freeze_end"]["weapons"] is not None:                
@@ -80,25 +87,9 @@ def process_data(data):
                 #     weapon_freeze_end = weapon2index(weapon_freeze_end)
                 #     seq.add(tuple(weapon_freeze_end))
 
-                # store round_end weapons for next round data
-                round_end = player["round_end"]
-                if round_end["weapons"] is None:
-                    # player is dead
-                    round_end_weapons[player_name] = default_weapons[player_name]
-                else:
-                    weapon_end = round_end["weapons"].split(',')
-                    if round_end["has_defuser"]:
-                        weapon_end.append("defuser")
-                    if round_end["armor"] > 0:
-                        if round_end["has_helmet"]:
-                            weapon_end.append("vesthelm")
-                        else:
-                            weapon_end.append("vest")
-                    round_end_weapons[player_name] = weapon2index(weapon_end)
-
-                if round == 1 or round == 16:
+                if round == 16:
                     continue
-
+                
                 # round is not 1 or 16, add round data to result only if data is valid
                 player_data = []
                 # player's team, 0 for terrorist and 1 for counter terrorist
@@ -106,14 +97,18 @@ def process_data(data):
                 # player's weapons at round start
                 player_data.append(weapon_start)
                 # player's money at round start, divided by 1k for normalization
-                player_data.append([int(round_start["account"]) / 1000])
+                player_data.append([int(player["round_start"]["account"]) / 1000])
                 # player's performance score at round start, divided by 10*round_num for normalization
-                player_data.append([int(round_start["player_score"]) / (round * 10)])
+                player_score = int(player["round_start"]["player_score"])
+                prev_round_score[player_name] = player_score
+                player_data.append([player_score / (round * 10)])
                 # team vs opponent score
                 if data[str(round)]["TvsCT"] is None or not isinstance(data[str(round)]["TvsCT"], str):
                     # data anomaly 
+                    round_valid = False
                     continue
 
+                # T VS CT score
                 T, CT = data[str(round)]["TvsCT"].split("vs")
                 if is_terrorist:
                     player_data.append([int(T) / 15, int(CT) / 15])
@@ -123,24 +118,21 @@ def process_data(data):
                 teammate_data = []
                 valid = True
                 for _, p2 in players.items():
-                    if player_name == p2["player_name"]:
-                        continue
-
-                    if p2["round_freeze_end"]["weapons"] is None:
+                    if p2["round_start"]["weapons"] is None:
                         # data anomaly 
                         valid = False
                         break
                         
-                    weapon_freeze_end = p2["round_freeze_end"]["weapons"].split(',')
-                    if p2["round_freeze_end"]["has_defuser"]:
-                        weapon_freeze_end.append("defuser")
-                    if p2["round_freeze_end"]["armor"] > 0:
-                        if p2["round_freeze_end"]["has_helmet"]:
-                            weapon_freeze_end.append("vesthelm")
+                    weapon_start = p2["round_start"]["weapons"].split(',')
+                    if p2["round_start"]["has_defuser"]:
+                        weapon_start.append("defuser")
+                    if p2["round_start"]["armor"] > 0:
+                        if p2["round_start"]["has_helmet"]:
+                            weapon_start.append("vesthelm")
                         else:
-                            weapon_freeze_end.append("vest")
-                    teammate_weapons = weapon2index(weapon_freeze_end)
-                    teammate_money = [int(p2["round_freeze_end"]["account"]) / 1000]
+                            weapon_start.append("vest")
+                    teammate_weapons = weapon2index(weapon_start)
+                    teammate_money = [int(p2["round_start"]["account"]) / 1000]
                     if p2["round_start"]["player_score"] is None:
                         # data anomaly 
                         valid = False
@@ -151,6 +143,7 @@ def process_data(data):
                     teammate_data.append([teammate_weapons, teammate_money, teammate_score])
                 
                 if not valid:
+                    round_valid = False
                     continue
                 player_data.append(teammate_data)
                     
@@ -166,12 +159,42 @@ def process_data(data):
                         if int(p2["team_number"]) != int(player["team_number"]):
                             opponent_money = [int(p2["round_start"]["account"]) / 1000]
                             opponent_score = [int(p2["round_start"]["player_score"]) / (round * 10)]
-                            # teammates' money score at round start, weapons last round end
-                            opponents_data.append([prev_opponent_weapons[p2["player_name"]], opponent_money, opponent_score])
+                            # teammates' money score at round start, weapons round start
+                            if p2["round_start"]["weapons"] is None:
+                                # data anomaly 
+                                valid = False
+                                break
+                            weapon_start = p2["round_start"]["weapons"].split(',')
+                            if p2["round_start"]["has_defuser"]:
+                                weapon_start.append("defuser")
+                            if p2["round_start"]["armor"] > 0:
+                                if p2["round_start"]["has_helmet"]:
+                                    weapon_start.append("vesthelm")
+                                else:
+                                    weapon_start.append("vest")
+                            opponent_weapons = weapon2index(weapon_start)
+                            opponents_data.append([opponent_weapons, opponent_money, opponent_score])
 
                 if not valid:
+                    round_valid = False
                     continue
                 player_data.append(opponents_data)
+
+                # weapons round_freeze_end
+                round_freeze_end = player["round_freeze_end"]
+                if round_freeze_end["weapons"] is None:
+                    # data anomaly 
+                    round_valid = False
+                    continue
+                weapon_freeze_end = round_freeze_end["weapons"].split(',')
+                if round_freeze_end["has_defuser"]:
+                    weapon_freeze_end.append("defuser")
+                if round_freeze_end["armor"] > 0:
+                    if round_freeze_end["has_helmet"]:
+                        weapon_freeze_end.append("vesthelm")
+                    else:
+                        weapon_freeze_end.append("vest")
+                weapon_freeze_end = weapon2index(weapon_freeze_end)
 
                 # player's purchasing actions
                 pickups = []
@@ -187,6 +210,7 @@ def process_data(data):
 
                 if len(player_label) > 10:
                     # might be a noisy data
+                    round_valid = False
                     continue
 
                 player_label = weapon2index(player_label)
@@ -196,13 +220,38 @@ def process_data(data):
                 #     else:
                 #         vocab[l] = 1
                 
-                # add data to result
-                processed_data[player_name].append((player_data, player_label))
+                # add data to round_data
+                player_score_cur = [player_score - prev_round_score[player_name]]
+                round_data[player_name] = [player_data, player_label, weapon_freeze_end, player_score_cur]
 
-        prev_opponent_weapons = copy.deepcopy(round_end_weapons)
-
+        # add data of this round to result
+        if round_valid:
+            pre_data = []
+            for player_name, r_data in round_data.items():
+                processed_data[player_name].append(r_data)
+                pre_data = r_data
+                
+    for player_name, p_data in processed_data.items():
+        if len(p_data) < 7:
+            return None
+ 
     return processed_data
 
+def shuffle_round(match_data):
+    indices = list(range(len(match_data[0])))
+    # print(indices)
+    
+    random.seed(4164)
+    random.shuffle(indices)
+
+    res = [[] for i in range(len(match_data))]
+
+    for j in range(len(match_data)):
+        for i in indices:
+            res[j].append(match_data[j][i])
+
+    return np.asarray(res)
+    
 def read_dataset(data_dir):
     # print(data_dir)
     processed_dir = data_dir[:-4] + "p.npy"
@@ -228,10 +277,13 @@ def read_dataset(data_dir):
     processed_data = []
     # seq = set()
     # vocab = {}
-    for match in data:
+    for match in tqdm(data):
         match_data = process_data(match) # len == 10
         if match_data is None:
             continue
+            
+        if len(match_data) != 10:
+            break
 
         processed_data.append(match_data)
 
@@ -270,15 +322,17 @@ def read_dataset(data_dir):
 
     total = len(processed_data)
     for i, match_data in enumerate(processed_data):
-        if 0 <= i < int(RATIO1 * total):
-            for _, md in match_data.items():
-                train_set.append(md)
+        # r = [len(x) for x in match_data.values()]
+        md = []
+        for _, pd in match_data.items():
+            md.append(pd)
+
+        if 0 <= i < int(RATIO1 * total):            
+            train_set.append(np.asarray(md))
         elif int(RATIO1 * total) <= i < int(RATIO2 * total):
-            for _, md in match_data.items():
-                val_set.append(md)
+            val_set.append(np.asarray(md))
         else:
-            for _, md in match_data.items():
-                test_set.append(md)
+            test_set.append(np.asarray(md))
 
     print("train set: ", len(train_set), end=" ")
     print("val set: ", len(val_set), end=" ")
@@ -289,6 +343,6 @@ def read_dataset(data_dir):
     # with open('./res.json', 'w') as f:
     #     json.dump(train_set[0], f, indent=4)
 
-    np.save(processed_dir, (train_set, val_set, test_set))
+#     np.save(processed_dir, (train_set, val_set, test_set))
 
     return train_set, val_set, test_set
