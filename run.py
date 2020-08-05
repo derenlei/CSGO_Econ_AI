@@ -16,7 +16,7 @@ from src.utils import *
 
 from tensorboardX import SummaryWriter
 
-DATA_DIR = './data/2600-15156.npy'
+DATA_DIR = './data/dataset/'
 
 action_money = []
 money_scaling = 0
@@ -37,23 +37,19 @@ def evaluation(model, optimizer, k_shot, val_set, npy_dict, gate):
     accuracies_type = []
     bi_accuracies = []
     ecos = []
-    #model.eval()
+
     for i in tqdm(range(len(val_set))):
         val_data_current = val_set[i]
         if val_data_current.shape[1] <= k_shot + 1:
+            print('found data size less than', k_shot)
             continue
-        #if len(val_data_current[0]) <= k_shot:
-        #    print('found data size less than', k_shot)
-        #    continue
-        # model.eval()
+
         model_insight = model.clone(npy_dict)
-#         model_insight.eval()
 
         previous_round = []
         previous_score = []
 
         for iteration in range(1, k_shot+1):
-
             # Sample minibatch
             data = val_data_current[:,iteration, 0].tolist().copy()
             labels = val_data_current[:, iteration, 1].tolist()
@@ -90,7 +86,7 @@ def evaluation(model, optimizer, k_shot, val_set, npy_dict, gate):
         for iteration in range(k_shot+1, len(val_data_current[0])):
             if iteration + k_shot == 17:
                 continue
-#             data, labels = val_data_current[iteration]
+
             data = val_data_current[:,iteration, 0].tolist().copy()
             labels = val_data_current[:, iteration, 1].tolist()
 
@@ -138,10 +134,6 @@ def insight_learning(model_insight, optimizer, k_shot, train_data_current, gate)
 
     np.random.shuffle(train_data_current)
 
-#     for i in range(10):
-#         print(train_data_current[i,2,1])
-#     print()
-
     previous_round = []
     previous_score = []
 
@@ -168,7 +160,7 @@ def insight_learning(model_insight, optimizer, k_shot, train_data_current, gate)
         prediction = model_insight.forward(data, gate)
 
         # Get loss
-        loss_dict = model_insight.loss(prediction, labels)# TODO
+        loss_dict = model_insight.loss(prediction, labels)
         if gate:
             loss = loss_dict['model_loss']
         else:
@@ -283,7 +275,7 @@ def main():
     parser.add_argument('--seed', default = 4164, help = 'random seed.')
     parser.add_argument('--shared_attention_weight', default = True, help = 'Sharing weight of attention layers or not.')
     parser.add_argument('--different_attention_weight', default = False, help = 'Different weight of attention for history information.')
-    parser.add_argument('--history_encoding', default = None, help = "Encode current player's weapon history.")
+    parser.add_argument('--history_encoding', default = None, help = "Encode current player's weapon history. Candidate value: 'avg', 'score_weighted', 'avg.time', 'score_weighted.time')
     parser.add_argument('--time_decaying', default = 0.99, help = "Decay of player's weighted sum history.")
     parser.add_argument('--gate', type=bool, default = True, help = "Use classifier or not.")
     parser.add_argument('--lstm_mode', default='triple', help="Use single or triple lstm.")
@@ -300,8 +292,7 @@ def main():
     money_scaling = args.money_scaling
     action_money = npy_dict["action_money"]
 
-    #run_dir = args.logdir
-    check_dir = args.logdir + 'checkpoint/' + args.statedir # os.path.join(run_dir, 'checkpoint')
+    check_dir = args.logdir + 'checkpoint/' + args.statedir
 
     """
     Load data and construct model
@@ -311,7 +302,7 @@ def main():
     torch.cuda.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    train_set, val_set, test_set = read_dataset(DATA_DIR) # TODO: implement DATA_DIR
+    train_set, val_set, test_set = read_dataset(DATA_DIR) 
 
     if args.mode == 'test':
         print("Begin test mode")
@@ -339,11 +330,11 @@ def main():
 
 
     # build model, optimizer
-    model = CsgoModel(args, npy_dict) # TODO: add args
+    model = CsgoModel(args, npy_dict)
     model.print_all_model_parameters()
     if torch.cuda.is_available():
         model.cuda()
-    meta_optimizer = torch.optim.SGD(model.parameters(), lr=args.meta_lr) # TODO: add args
+    meta_optimizer = torch.optim.SGD(model.parameters(), lr=args.meta_lr)
     info = {}
     state = None
     meta_iteration = 0
@@ -353,7 +344,7 @@ def main():
     """
     # checkpoint is directory -> Find last model or '' if does not exist
     print('check_dir', check_dir)
-    if os.path.isdir(check_dir): # TODO: add args
+    if os.path.isdir(check_dir):
         latest_checkpoint = find_latest_file(check_dir)
         if latest_checkpoint:
             print('Latest checkpoint found:', latest_checkpoint)
@@ -419,13 +410,8 @@ def main():
     # Meta Train
     train_seq_loss, train_bi_loss, train_accuracy, train_acc_gun, train_acc_grenade, train_acc_equip, train_eco, train_bi_accuracy = [], [], [], [], [], [], [], []
     for meta_iteration in tqdm(range(args.start_meta_iteration, args.meta_iterations)):
-#         args.gate = meta_iteration > 1500
-        
-        #print('meta_iteration: ', meta_iteration)
         train_data_current_orig = random.choice(train_set)
 
-#         while len(train_data_current[0]) <= 5:
-#             train_data_current_orig = random.choice(train_set)
         train_data_current = copy.deepcopy(train_data_current_orig)
 
         # Update learning rate
@@ -438,16 +424,13 @@ def main():
 
         # Update insight model
 
-        seq_loss, bi_loss, accuracy, acc_gun, acc_grenade, acc_equip, eco, bi_accuracy = insight_learning(model_insight, optimizer, args.shots, train_data_current, args.gate) # TODO
+        seq_loss, bi_loss, accuracy, acc_gun, acc_grenade, acc_equip, eco, bi_accuracy = insight_learning(model_insight, optimizer, args.shots, train_data_current, args.gate)
         state = optimizer.state_dict()  # save optimizer state
 
         # Update slow net
         model.point_grad_to(model_insight)
         meta_optimizer.step()
 
-        # calculate average
-#         loss = loss.detach().item()
-#         train_loss.append(loss)
         train_seq_loss.append(seq_loss)
         train_bi_loss.append(bi_loss)
         train_accuracy.append(accuracy)
@@ -457,16 +440,7 @@ def main():
         train_eco.append(eco)
         train_bi_accuracy.append(bi_accuracy)
 
-        # save log
-        # info.setdefault('loss', {})
-        # info.setdefault('accuracy', {})
-        # info.setdefault('meta_lr', {})
-        # info['loss'][meta_iteration] = loss
-        # info['accuracy'][meta_iteration] = accuracy
-        # info['meta_lr'][meta_iteration] = meta_lr
-
         if meta_iteration % 50 == 0 and meta_iteration > 0:
-#             logger.add_scalar('loss', sum(train_loss)/(len(train_loss)*1.0), meta_iteration)
             if args.lstm_mode == 'triple':
                 seq_loss_mean = np.nanmean(train_seq_loss, axis=0)
                 logger.add_scalar('seq_loss_gun', seq_loss_mean[0], meta_iteration)
@@ -502,7 +476,6 @@ def main():
             train_seq_loss, train_bi_loss, train_accuracy, train_eco, train_bi_accuracy = [], [], [], [], []
 
         # Meta Evaluation
-
         if meta_iteration % args.validate_every == 0 and meta_iteration != args.start_meta_iteration:
             print('Start evaluation')
 
@@ -512,8 +485,7 @@ def main():
 
             # Update insight model
             val_set_curr = copy.deepcopy(val_set)
-            #np.mean(accuracies), np.mean(accuracies_type, axis=0), np.mean(ecos), np.mean(bi_accuracies, axis=0)
-            eval_accuracy, eval_acc_gun, eval_acc_grenade, eval_acc_equip, eval_eco, eval_bi_accuracy = evaluation(model_insight, optimizer, args.shots, val_set_curr, npy_dict, args.gate) # TODO
+            eval_accuracy, eval_acc_gun, eval_acc_grenade, eval_acc_equip, eval_eco, eval_bi_accuracy = evaluation(model_insight, optimizer, args.shots, val_set_curr, npy_dict, args.gate)
             state = optimizer.state_dict()  # save optimizer state
 
             # save log
@@ -548,16 +520,13 @@ def main():
                 break
 
             # save checkpoint
-
-            #if meta_iteration % args.check_every == 0 and meta_iteration != args.start_meta_iteration:
-
             info.setdefault('seq_loss', {})
             info.setdefault('bi_loss', {})
             info.setdefault('accuracy', {})
             info.setdefault('meta_lr', {})
             info.setdefault('eco', {})
             info.setdefault('binary_accuracy', {})
-#             info['loss'][meta_iteration] = loss#.detach().item()
+            
             info['seq_loss'][meta_iteration] = seq_loss
             info['bi_loss'][meta_iteration] = bi_loss
             info['accuracy'][meta_iteration] = accuracy
@@ -584,7 +553,8 @@ def main():
                     os.mkdir(check_dir)
                 torch.save(checkpoint, checkpoint_path)
                 print('Update best checkpoint to', checkpoint_path)
-
+    
+    # test best model on test set
     model = CsgoModel(args, npy_dict)
     print('\nTest Performance')
     checkpoint_path = os.path.join(check_dir, 'best_eval.pth')

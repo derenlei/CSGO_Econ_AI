@@ -1,4 +1,3 @@
-import copy
 import json
 import numpy as np
 import os
@@ -9,7 +8,6 @@ RATIO1 = 0.8
 RATIO2 = 0.9
 
 weapon_index_dict = {}
-# w = set()
 
 def weapon2index(weapon_list):
     # global w
@@ -19,9 +17,6 @@ def weapon2index(weapon_list):
     for weapon in weapon_list:
         if weapon in weapon_index_dict:
             res.append(weapon_index_dict[weapon])
-        # else:
-            # else:
-            #     w.add(weapon)
 
     # sort
     res.sort()
@@ -34,7 +29,6 @@ def process_data(data):
 
     prev_round_score = {}
     for round in range(2, 31):
-#         print(round)
         if str(round) not in data:
             if round == 2:
                 return None
@@ -73,19 +67,6 @@ def process_data(data):
                     else:
                         weapon_start.append("vest")
                 weapon_start = weapon2index(weapon_start)
-
-                # save round_freeze_end weapons to seq set
-                # if player["round_freeze_end"]["weapons"] is not None:                
-                #     weapon_freeze_end = player["round_freeze_end"]["weapons"].split(',')
-                #     if player["round_freeze_end"]["has_defuser"]:
-                #         weapon_freeze_end.append("defuser")
-                #     if player["round_freeze_end"]["armor"] > 0:
-                #         if player["round_freeze_end"]["has_helmet"]:
-                #             weapon_freeze_end.append("vesthelm")
-                #         else:
-                #             weapon_freeze_end.append("vest")
-                #     weapon_freeze_end = weapon2index(weapon_freeze_end)
-                #     seq.add(tuple(weapon_freeze_end))
 
                 if round == 16:
                     continue
@@ -214,70 +195,31 @@ def process_data(data):
                     continue
 
                 player_label = weapon2index(player_label)
-                # for l in player_label:
-                #     if l in vocab:
-                #         vocab[l] += 1
-                #     else:
-                #         vocab[l] = 1
-                
+
                 # add data to round_data
                 player_score_cur = [player_score - prev_round_score[player_name]]
                 round_data[player_name] = [player_data, player_label, weapon_freeze_end, player_score_cur]
 
         # add data of this round to result
         if round_valid:
-            pre_data = []
             for player_name, r_data in round_data.items():
                 processed_data[player_name].append(r_data)
-                pre_data = r_data
                 
     for player_name, p_data in processed_data.items():
         if len(p_data) < 7:
             return None
  
     return processed_data
-
-def shuffle_round(match_data):
-    indices = list(range(len(match_data[0])))
-    # print(indices)
     
-    random.seed(4164)
-    random.shuffle(indices)
-
-    res = [[] for i in range(len(match_data))]
-
-    for j in range(len(match_data)):
-        for i in indices:
-            res[j].append(match_data[j][i])
-
-    return np.asarray(res)
-    
-def read_dataset(data_dir):
-    # print(data_dir)
-    processed_dir = data_dir[:-4] + "p.npy"
-    # print(processed_dir)
-    if os.path.exists(processed_dir):
-        dataset = np.load(processed_dir, allow_pickle=True)
-        # dataset = np.load(processed_dir)
-        train_set, val_set, test_set = dataset
-
-        print("train set: ", len(train_set), end=" ")
-        print("val set: ", len(val_set), end=" ")
-        print("test set: ", len(test_set))
-
-        return train_set, val_set, test_set
-
+def process_dataset(dataset_dir):
     global weapon_index_dict
-    with open("./data/weapon_index.json") as f:
+    with open("../data/weapon_index.json") as f:
         weapon_index_dict = json.load(f)
 
-    data = np.load(data_dir, allow_pickle=True)
-    # data = np.load(data_dir)
-
     processed_data = []
-    # seq = set()
-    # vocab = {}
-    for match in tqdm(data):
+    for file in tqdm(os.listdir(dataset_dir + "raw/")):
+        with open(os.path.join(dataset_dir + "raw/", file)) as f:
+            match = json.load(f)
         match_data = process_data(match) # len == 10
         if match_data is None:
             continue
@@ -286,32 +228,6 @@ def read_dataset(data_dir):
             break
 
         processed_data.append(match_data)
-
-    # seq = list(seq)
-    # seq.sort(key=lambda x: len(x))
-    # with open("./data/seq.txt", 'w') as f:
-    #     for s in seq:
-    #         # print(s)
-    #         for i in s[:-1]:
-    #             f.write(str(i))
-    #             f.write('\t')
-    #         if len(s) != 0:
-    #             f.write(str(s[-1]))
-    #         f.write('\n')
-
-    # with open("./data/vocab.txt", 'w') as f:
-    #     f.write("0")
-    #     f.write("\n")
-    #     f.write("0")
-    #     f.write("\n")
-    #     f.write("0")
-    #     f.write("\n")
-    #     for i in range(44):
-    #         if i in vocab:
-    #             f.write(str(vocab[i]))
-    #         else:
-    #             f.write("0")
-    #         f.write("\n")
 
     random.seed(4164)
     random.shuffle(processed_data)
@@ -322,7 +238,6 @@ def read_dataset(data_dir):
 
     total = len(processed_data)
     for i, match_data in enumerate(processed_data):
-        # r = [len(x) for x in match_data.values()]
         md = []
         for _, pd in match_data.items():
             md.append(pd)
@@ -338,11 +253,21 @@ def read_dataset(data_dir):
     print("val set: ", len(val_set), end=" ")
     print("test set: ", len(test_set))
 
-    # global w
-    # print(w)
-    # with open('./res.json', 'w') as f:
-    #     json.dump(train_set[0], f, indent=4)
+    np.save(dataset_dir + "processed.npy", (train_set, val_set, test_set))
 
-#     np.save(processed_dir, (train_set, val_set, test_set))
+def read_dataset(dataset_dir):
+    train_set, val_set, test_set = np.load(dataset_dir + "processed.npy", allow_pickle=True)
+
+    print("train set: ", len(train_set), end=" ")
+    print("val set: ", len(val_set), end=" ")
+    print("test set: ", len(test_set))
 
     return train_set, val_set, test_set
+
+
+if __name__ == "__main__":
+    dataset_dir = "../data/dataset/"
+
+    process_dataset(dataset_dir)
+
+    # train_set, val_set, test_set = read_dataset(dataset_dir)

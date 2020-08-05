@@ -5,9 +5,6 @@ from torch.autograd import Variable
 import numpy as np
 from collections import Counter
 import src.utils as utils
-import time
-
-import argparse
 
 
 EPSILON = float(np.finfo(float).eps)
@@ -48,7 +45,6 @@ class ReptileModel(nn.Module):
 class CsgoModel(ReptileModel):
     def __init__(self, args, npy_dict):
         super(CsgoModel, self).__init__()
-        # ReptileModel.__init__(self)
         self.args = args
         self.embedding = torch.tensor(npy_dict["action_embedding"]).cuda().float()
         self.id2name = list(npy_dict["action_name"])
@@ -89,14 +85,11 @@ class CsgoModel(ReptileModel):
 
         self.shared_attention_weight = args.shared_attention_weight
         self.different_attention_weight = args.different_attention_weight
-        # TODO: ways of combining history representation of self
-#         self.hist_encoding = 'avg'
+        # ways of combining history representation of self
         self.hist_encoding = args.history_encoding
         self.time_decaying = args.time_decaying
         self.lstm_mode = args.lstm_mode
 
-        # self.action_mask = torch.ones(self.output_dim).float().cuda()
-        # self.action_mask[self.start_idx] = 0.0
         side_mask = npy_dict["side_mask"]
         self.side_mask = []
         self.side_mask.append(torch.tensor(side_mask['t_mask'].astype(float)).cuda().unsqueeze(0))
@@ -109,25 +102,19 @@ class CsgoModel(ReptileModel):
         self.ff_dim = args.ff_dim
         self.resource_dim = args.resource_dim
         self.money_dim = 5 # only allies
-        # self.team_dim = 4
-        self.team_dim = 2  # no round score info
-        #self.input_dim = (self.embedding_dim + self.resource_dim) * 3 + self.team_dim
+        self.team_dim = 2
         if self.hist_encoding is not None:
             self.input_dim = self.embedding_dim * 4 + self.money_dim + self.team_dim
         else:
             self.input_dim = self.embedding_dim * 3 + self.money_dim + self.team_dim
-#         self.input_dim = (self.embedding_dim + self.resource_dim) * 2 + self.team_dim  # no teammate
 
         self.ff_dropout_rate = args.ff_dropout_rate
         self.max_output_num = args.max_output_num
         self.beam_size = args.beam_size
 
-
-
         self.define_modules()
         #xavier_initialization
         self.initialize_modules()
-
 
     def reward_fun(self, a, a_r):
         # F1 score
@@ -150,9 +137,7 @@ class CsgoModel(ReptileModel):
         F1_score = 2 * precision * recall / (precision + recall + EPSILON)
         return F1_score
 
-
     def loss(self, predictions, labels):
-        #global debug_loss, last_log_prob
         def stablize_reward(r):
             r_2D = r.view(-1, self.num_rollouts)
             if self.baseline == 'avg_reward':
@@ -178,7 +163,6 @@ class CsgoModel(ReptileModel):
         # LSTM loss
         seq_loss_print = []
         seq_loss = torch.tensor(0.0).cuda()
-        # label_by_category = utils.filter_category_actions(labels, self.id2type, self.output_categories)
 
         if self.lstm_mode == 'triple':
             label_by_batch = utils.filter_batched_category_actions(labels, self.id2type, self.output_categories)
@@ -228,9 +212,6 @@ class CsgoModel(ReptileModel):
 
         loss_dict = {}
         loss_dict['model_loss'] = seq_loss.double() + bi_loss.double()
-        '''if torch.isnan(loss_dict['model_loss']):
-            print(debug_loss)
-            assert 1==0'''
         loss_dict['bi_loss'] = bi_loss_print
         loss_dict['seq_loss'] = seq_loss_print
         
@@ -239,13 +220,6 @@ class CsgoModel(ReptileModel):
         return loss_dict
 
     def get_embedding(self, idx):
-        '''if not isinstance(idx, list):
-            return self.embedding[idx]
-        else:
-            ret = []
-            for i in idx:
-                ret.append(self.embedding[i])
-            return ret'''
         return self.embedding[idx]
 
     def high_att(self, x, side = None):
@@ -264,7 +238,6 @@ class CsgoModel(ReptileModel):
         elif side == 'o':
             h = self.v2_o(h)
         att = F.softmax(h, 0)
-#         print("high att:", att.detach().cpu().numpy().tolist())
         ret = torch.sum(att * x, 0)
         return ret
 
@@ -391,19 +364,9 @@ class CsgoModel(ReptileModel):
         return residual_capacity
 
     def get_capacity_mask(self, res_capacity, mute_mask):
-        # is_mute = (torch.tensor(res_action_capacity) == 0).float().cuda()
-#         ret = []
-#         for j in range(len(res_action_capacity)):
-#             mask = torch.ones(mute_mask.size()[1]).cuda()
-#             for i, res_cap in enumerate(res_action_capacity[j]):
-#                 if res_cap == 0:
-#                     mask *= mute_mask[i]
-#             ret.append(mask.unsqueeze(0))
-#         return torch.cat(ret, 0)
         to_multiply_mask = 1 - (res_capacity > 0).float()
         ret = (torch.mm(to_multiply_mask, mute_mask) == torch.sum(to_multiply_mask, 1).unsqueeze(1)).float()
         return ret
-    
     
     def generate(self, init_embedding, init_h, init_c, no_output_bi, money, side_all, res_action_capacity, res_type_capacity, is_greedy=True):
         '''
@@ -541,7 +504,6 @@ class CsgoModel(ReptileModel):
         
         return action_list, action_list_by_category, action_prob_by_category
 
-
     def forward(self, data, gate=True):
         '''
         forward for one round
@@ -549,8 +511,6 @@ class CsgoModel(ReptileModel):
         x_s: num_weapon #(num_batch, num_shot, num_weapon)
         x_t, x_o: (num_player, num_weapon) #(num_batch, num_shot, num_player, num_weapon)
         '''
-#         start_time = time.time()
-
         batch_size = len(data)
         h = []
         money_all = []
@@ -604,11 +564,9 @@ class CsgoModel(ReptileModel):
 
             # money representation
             # teammate money only
-            # TODO: enemy money
             h_money = self.encode_money(torch.tensor(money_t).cuda())
 
             # incorporate round history information into self representation
-            # TODO: x_s_history = None
             if self.hist_encoding is not None:
                 h_s_history = []
                 for x_s_h in x_s_history:
@@ -639,19 +597,14 @@ class CsgoModel(ReptileModel):
                 else:
                     raise NotImplementedError("Specified way to process self history is not defined.")
 
-            # TODO: f(hs, h_s_history) -> hs'
-
             # concat representations
             if self.hist_encoding is not None:
                 hb = torch.cat([h_s_history, hs, ht, ho, h_money], -1)
             else:
                 hb = torch.cat([hs, ht, ho, h_money], -1)
-            #hb = torch.cat([hs, ht, ho], -1)
-#             hb = torch.cat([hs, ho], -1)  # no teammate
 
             # incorporate team information
-            #hb = torch.cat([hb, self.side_embedding[side[0]], torch.tensor(score).cuda()], -1)
-            hb = torch.cat([hb, self.side_embedding[side[0]]], -1) # no round score info
+            hb = torch.cat([hb, self.side_embedding[side[0]]], -1)
 
             h.append(hb.unsqueeze(0))
 
@@ -686,8 +639,6 @@ class CsgoModel(ReptileModel):
         for x_s in x_s_all:
             res_action_capacity.append(self.get_residual_capacity(x_s, self.action_capacity))
             res_type_capacity.append(self.get_residual_capacity(self.id2type[x_s], self.type_capacity))
-        #res_action_capacity = self.get_residual_capacity(x_s_all, self.action_capacity)
-        #res_type_capacity = self.get_residual_capacity(self.id2type[x_s], self.type_capacity)
         res_action_capacity = torch.tensor(res_action_capacity).cuda()
         res_type_capacity = torch.tensor(res_type_capacity).cuda()
 
@@ -697,16 +648,12 @@ class CsgoModel(ReptileModel):
         # transform representation to initialize (h, c)
         init_h = self.HLN(h).view(self.history_num_layers, batch_size, self.history_dim)
         init_c = self.CLN(h).view(self.history_num_layers, batch_size, self.history_dim)
-        '''init_h = self.HLN(h.detach()).view(self.history_num_layers, 1, self.history_dim)
-        init_c = self.CLN(h.detach()).view(self.history_num_layers, 1, self.history_dim)'''
 
         action_list, action_list_by_category, action_prob_by_category = self.generate(init_embedding, init_h, init_c, no_output_bi, money.clone(), side_all, res_action_capacity.clone(), res_type_capacity.clone(), is_greedy=False)
         
         greedy_list, greedy_list_by_category, _ = self.generate(init_embedding, init_h, init_c, no_output_bi, money.clone(), side_all, res_action_capacity.clone(), res_type_capacity.clone(), is_greedy=True)
         
         return action_list, greedy_list, action_prob_by_category, no_output_bi.cpu().numpy().tolist(), bi_prob, action_list_by_category, greedy_list_by_category
-
-
 
     def initialize_lstm(self, init_embedding, init_state, category_id=None):
         if category_id is None:
@@ -755,7 +702,7 @@ class CsgoModel(ReptileModel):
         print('--------------------------')
         print()
 
-    # not using
+    # This method is not used.
     def predict(self, data, gate=True):
         '''
         x: input
@@ -859,7 +806,7 @@ class CsgoModel(ReptileModel):
         log_action_prob = torch.zeros(1).cuda()
         k = 1
         for j in range(self.output_categories):
-#             print('category {}'.format(j))
+
             # initialize LSTM
             init_action = [self.start_idx] * batch_size * k
             init_embedding = self.get_embedding(init_action).unsqueeze(1)
@@ -871,7 +818,6 @@ class CsgoModel(ReptileModel):
 
 
             for i in range(self.max_output_num):
-#                 print(f'generate action {i}')
                 if torch.sum(is_end) == len(is_end):
                     for _ in range(self.max_output_num - i):
                         if action_list is not None:
@@ -905,7 +851,6 @@ class CsgoModel(ReptileModel):
                 k = 1
                 log_action_prob, action_ind = torch.topk(log_action_dist, k)
                 action_offset = (action_ind / self.output_dims[j] + torch.arange(batch_size).unsqueeze(1).cuda() * last_k).view(-1)
-                # beiieb
 
                 output_idx = action_ind % self.output_dims[j]
                 action_idx = torch.tensor(self.category_action_offset[j]).cuda()[output_idx].view(-1)
@@ -944,10 +889,8 @@ class CsgoModel(ReptileModel):
 
         return action_list, action_log_prob, no_output_bi.cpu().numpy().tolist()
 
-
     def define_modules(self):
         # terrorist
-        #self.LN1 = nn.Linear(self.embedding_dim, self.ff_dim)
         if self.shared_attention_weight:
             self.att_LN1 = nn.Linear(self.embedding_dim, self.ff_dim)
             self.v1 = nn.Linear(self.ff_dim, 1)
@@ -965,10 +908,8 @@ class CsgoModel(ReptileModel):
             self.att_LN1_o = nn.Linear(self.embedding_dim, self.ff_dim)
             self.v1_o = nn.Linear(self.ff_dim, 1)
 
-            #self.att_LN2_t = nn.Linear(self.embedding_dim + self.resource_dim, self.ff_dim)
             self.att_LN2_t = nn.Linear(self.embedding_dim, self.ff_dim)
             self.v2_t = nn. Linear(self.ff_dim, 1)
-            #self.att_LN2_o = nn.Linear(self.embedding_dim + self.resource_dim, self.ff_dim)
             self.att_LN2_o = nn.Linear(self.embedding_dim, self.ff_dim)
             self.v2_o = nn. Linear(self.ff_dim, 1)
 
@@ -1181,108 +1122,9 @@ class CsgoModel(ReptileModel):
             nn.init.xavier_uniform_(self.LN1.weight)
             nn.init.xavier_uniform_(self.LN2.weight)
 
-
     def clone(self, npy_dict):
         clone = CsgoModel(self.args, npy_dict)
         clone.load_state_dict(self.state_dict())
         if self.is_cuda():
             clone.cuda()
         return clone
-
-if __name__ == '__main__':
-    def get_capacity_mask(res_capacity, mute_mask):
-        # is_mute = (torch.tensor(res_action_capacity) == 0).float().cuda()
-#         ret = []
-#         for j in range(len(res_action_capacity)):
-#             mask = torch.ones(mute_mask.size()[1]).cuda()
-#             for i, res_cap in enumerate(res_action_capacity[j]):
-#                 if res_cap == 0:
-#                     mask *= mute_mask[i]
-#             ret.append(mask.unsqueeze(0))
-#         return torch.cat(ret, 0)
-        to_multiply_mask = 1 - (res_capacity > 0).float()
-        ret = (torch.mm(to_multiply_mask, mute_mask) == torch.sum(to_multiply_mask, 1).unsqueeze(1)).float()
-        return ret
-    mute_type_mask = torch.tensor([[0,0,1,1,1,1,1,1],[1,1,0,0,1,1,1,1],[1,1,1,1,0,0,1,1],[1,1,1,1,1,1,0,0]]).float()
-    res_type_capacity = torch.randint(20,(3, 4)) - 10
-    print("mask:")
-    print(mute_type_mask)
-    print("capacity:")
-    print( (res_type_capacity>0).float())
-
-    action_mask = get_capacity_mask(res_type_capacity, mute_type_mask)
-    print(action_mask)
-    assert 1 == 0
-
-
-    # Parsing
-    parser = argparse.ArgumentParser('Train MAML on CSGO')
-    # params
-    parser.add_argument('--logdir', default='log/', type=str, help='Folder to store everything/load')
-    parser.add_argument('--player_mode', default='terrorist', type=str, help='terrorist or counter_terrorist')
-    parser.add_argument('--shots', default=5, type=int, help='shots per class (K-shot)')
-    parser.add_argument('--start_meta_iteration', default=0, type=int, help='start number of meta iterations')
-    parser.add_argument('--meta_iterations', default=100, type=int, help='number of meta iterations')
-    parser.add_argument('--meta_lr', default=1., type=float, help='meta learning rate')
-    parser.add_argument('--lr', default=1e-3, type=float, help='base learning rate')
-    parser.add_argument('--check_every', default=1000, type=int, help='Checkpoint every')
-    parser.add_argument('--checkpoint', default='', help='Path to checkpoint. This works only if starting fresh (i.e., no checkpoints in logdir)')
-    parser.add_argument('--action_embedding', default = '/home/derenlei/MAML/data/action_embedding.npy', help = 'Path to action embedding.')
-    parser.add_argument('--action_name', default = '/home/derenlei/MAML/data/action_name.npy', help = 'Path to action name.')
-    parser.add_argument('--action_money', default = '/home/derenlei/MAML/data/action_money.npy', help = 'Path to action money.')
-    parser.add_argument('--side_mask', default = '/home/derenlei/MAML/data/mask.npz', help = 'Path to mask of two sides.')
-    parser.add_argument('--history_dim', default = 512, help = 'LSTM hidden dimension.')
-    parser.add_argument('--history_num_layers', default = 2, help = 'LSTM layer number.')
-    parser.add_argument('--ff_dim', default = 256, help = 'MLP dimension.')
-    parser.add_argument('--resource_dim', default = 2, help = 'Resource (money, performance, ...) dimension.')
-    parser.add_argument('--ff_dropout_rate', default = 0.1, help = 'Dropout rate of MLP.')
-    parser.add_argument('--max_output_num', default = 10, help = 'Maximum number of actions each round.')
-    parser.add_argument('--beam_size', default = 128, help = 'Beam size of beam search predicting.')
-
-
-    # args Processing
-    args = parser.parse_args()
-    print('start')
-    model = CsgoModel(args)
-    print('model created')
-    # money = torch.randint(100, 1000, (10,))
-    money_s = [torch.randint(100, 1000, (1,)).float().item()]
-    money_t = torch.randint(100, 1000, (4,)).float()
-    money_o = torch.randint(100, 1000, (5,)).float()
-    money = (money_s, money_t, money_o)
-
-    perf_s = [torch.randint(0, 5, (1,)).float().item()]
-    perf_t = torch.randint(0, 5, (4,)).float()
-    perf_o = torch.randint(0, 5, (5,)).float()
-    perf = (perf_s, perf_t, perf_o)
-
-    x_s = torch.randint(2, 20, (5,)).cuda()
-    x_t = []
-    for i in range(4):
-        num_weapon = torch.randint(3, 10, (1,)).item()
-        xt = torch.randint(2, 20, (num_weapon,)).cuda()
-        x_t.append([xt, [money_t[i].item()], [perf_t[i].item()]])
-    x_o = []
-    for i in range(5):
-        num_weapon = torch.randint(3, 10, (1,)).item()
-        xo = torch.randint(2, 20, (num_weapon,)).cuda()
-        x_o.append([xo, [money_o[i].item()], [perf_o[i].item()]])
-    x = (x_s, x_t, x_o)
-
-    side = [0]
-    score = [0.8, 0.5]
-    data = [side, x_s, money_s, perf_s, score, x_t, x_o]
-    print('start_forward')
-    action_list, action_prob, greedy_list = model.forward(data)
-    print(action_list)
-    print(action_prob)
-    labels = torch.randint(2, 20, (torch.randint(3, 10, (1,)).item(),))
-    labels[-1] = 1
-    print(labels)
-    print('loss')
-    loss_dict = model.loss((action_list, action_prob, greedy_list), labels)
-    print(loss_dict)
-    print('prediction')
-    action_list, action_prob = model.predict(data)
-    print(action_list)
-    print(action_prob)

@@ -6,7 +6,7 @@ import numpy as np
 from tqdm import tqdm
 
 
-DATA_DIR = 'data/2600-15156.npy'
+DATA_DIR = 'data/dataset/'
 
 def greedy(is_terrorist, weapons, money, w_attr, grenades, weapon_index):
     # current weapons
@@ -20,15 +20,6 @@ def greedy(is_terrorist, weapons, money, w_attr, grenades, weapon_index):
 
     purchase_list = []
     # Buy primary weapon
-#     if is_terrorist and money >= w_attr["price"][weapon_index["AK-47"]]:
-#     	if primary_weapon_start is None or w_attr["price"][weapon_index["AK-47"]] > w_attr["price"][primary_weapon_start]:
-#     		money -= w_attr["price"][weapon_index["AK-47"]]
-#     		purchase_list.append(weapon_index["AK-47"])
-#     if not is_terrorist and money >= w_attr["price"][weapon_index["M4A4"]]:
-#     	if primary_weapon_start is None or w_attr["price"][weapon_index["M4A4"]] > w_attr["price"][primary_weapon_start]:
-#     		money -= w_attr["price"][weapon_index["M4A4"]]
-#     		purchase_list.append(weapon_index["M4A4"])
-
     max_price = 0
     max_price_weapon = primary_weapon_start
     for w in range(44):
@@ -63,7 +54,7 @@ def greedy(is_terrorist, weapons, money, w_attr, grenades, weapon_index):
             purchase_list.append(g)
             cnt += 1
 
-    # Buy Gear
+    # Buy Equipments
     if weapon_index["vest"] not in weapons:
         if money >= w_attr["price"][weapon_index["vesthelm"]]:
             money -= w_attr["price"][weapon_index["vesthelm"]]

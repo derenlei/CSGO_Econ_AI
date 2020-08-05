@@ -80,14 +80,6 @@ def get_batched_acc(a,a_r):
 
 def get_accuracy(a, a_r):
     # F1 score
-    # remove end token
-    '''if a[-1] == self.end_idx:
-        a_new = a[: -1]
-    else:
-        a_new = a'''
-    a_new = a
-    #a_r_new = a_r[: -1] # first version action embedding with end token
-    a_r_new = a_r
     # both are empty
     if len(a) == 0 and len(a_r) == 0:
         return 1.0
@@ -134,8 +126,6 @@ def get_batched_finance_diff(a, a_r, m_start, action_money):
 def get_finance_diff(a, a_r, m_start, action_money):
     m = sum(action_money[n] for n in a)
     m_r = sum(action_money[n] for n in a_r)
-    #print("--------a:", a, "m: ", m, "m_r:", m_r, "m_start:", m_start)
-    # assert m_r <= m_start, (a_r, m_r, m_start)
     if int(m_start) == 0:
         m_start = 0.1
     return abs(m_r - m) / float(m_start)
