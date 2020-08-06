@@ -2,6 +2,8 @@
 
 This is a baseline deep RL model for round-based game strategy learner.
 
+This github repository serves as the artifacts repository for the paper "Learning to Reason in Round-based Games: Multi-task Sequence Generation forPurchasing Decision Making in First-person Shooters".
+
 A good explanation of CS:GO economy strategy can be found [here](https://www.metabomb.net/csgo/gameplay-guides/csgo-economy-guide-2).
 
 ## Quick Links
