@@ -49,6 +49,9 @@ You can use CS:GO demo files and preprocess the structured data with [this visua
 Install PyTorch (>= 1.4.0) following the instuctions on the [PyTorch](https://pytorch.org/). Our code is written in Python3.
 
 ### Dataset
+
+Download dataset at [Google Drive](https://drive.google.com/drive/folders/1p3pH2zpSGgWNG7deNklBgapyhxEDITbq?usp=sharing) and put it in `data/dataset` folder. The raw dataset consists of json files extracted from demos. The 'processed.npy' is acquired by `src/preprocess.py`.
+
 Dataset is processed in the `data` folder.
 - 'action_capacity.npy': Capacity for each weapon.
 - 'action_embedding.npy', 'action_embedding.xlsx': Action embedding file.
