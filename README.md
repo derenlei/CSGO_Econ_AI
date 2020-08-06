@@ -1,6 +1,6 @@
 # Learning to Reason in Round-based Games: Multi-task Sequence Generation for Purchasing Decision Making in First-person Shooters
 
-This is a baseline model for round-based game CS:GO'S strategy learner.
+This is a baseline model for round-based game CS:GO's strategy learner.
 
 This github repository serves as the artifacts repository for the paper "Learning to Reason in Round-based Games: Multi-task Sequence Generation forPurchasing Decision Making in First-person Shooters".
 
