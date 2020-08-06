@@ -1,5 +1,8 @@
-# Meta-learning for CS:GO Economy Strategy
-This is a baseline deep RL model for round-based game strategy learner.
+# Learning to Reason in Round-based Games: Multi-task Sequence Generation for Purchasing Decision Making in First-person Shooters
+
+This is a baseline model for round-based game CS:GO's strategy learner.
+
+This github repository serves as the artifacts repository for the paper "Learning to Reason in Round-based Games: Multi-task Sequence Generation forPurchasing Decision Making in First-person Shooters".
 
 A good explenation of CS:GO economy strategy can be found [here](https://www.metabomb.net/csgo/gameplay-guides/csgo-economy-guide-2).
 
@@ -13,7 +16,7 @@ The goal is to assign weapons and equipments to a target player each round. To d
 **Evaluation**: F1 score
 
 
-## Getting the data
+## Preprocessing data
 You can use CS:GO demo files and preprocess the structured data with [this visualizer](https://github.com/Brammz/csgo-demo-visualizer)
 
 ## Method
