@@ -9,7 +9,6 @@ import signal
 import time
 import copy
 
-#from MAML.args import argument_parser
 from src.preprocess import read_dataset
 from src.model import CsgoModel
 from src.utils import *
@@ -246,8 +245,7 @@ def main():
     parser = argparse.ArgumentParser('Train MAML on CSGO')
     # params
     parser.add_argument('--logdir', default='log/', type=str, help='Folder to store everything/load')
-    parser.add_argument('--statedir', default='iteration3-score-weighted', type=str, help='Folder name to store model state')
-    parser.add_argument('--player_mode', default='terrorist', type=str, help='terrorist or counter_terrorist')
+    parser.add_argument('--statedir', default='default_path', type=str, help='Folder name to store model state')
     parser.add_argument('--shots', default=5, type=int, help='shots per class (K-shot)')
     parser.add_argument('--start_meta_iteration', default=0, type=int, help='start number of meta iterations')
     parser.add_argument('--meta_iterations', default=6000, type=int, help='number of meta iterations')
@@ -256,15 +254,15 @@ def main():
     parser.add_argument('--validate_every', default=500, type=int, help='validate every')
     parser.add_argument('--check_every', default=500, type=int, help='Checkpoint every')
     parser.add_argument('--checkpoint', default='log/checkpoint', help='Path to checkpoint. This works only if starting fresh (i.e., no checkpoints in logdir)')
-    parser.add_argument('--action_embedding', default = '/home/derenlei/MAML/data/action_embedding2.npy', help = 'Path to action embedding.')
-    parser.add_argument('--action_name', default = '/home/derenlei/MAML/data/action_name.npy', help = 'Path to action name.')
-    parser.add_argument('--action_money', default = '/home/derenlei/MAML/data/action_money.npy', help = 'Path to action money.')
+    parser.add_argument('--action_embedding', default = 'data/action_embedding.npy', help = 'Path to action embedding.')
+    parser.add_argument('--action_name', default = 'data/action_name.npy', help = 'Path to action name.')
+    parser.add_argument('--action_money', default = 'data/action_money.npy', help = 'Path to action money.')
     parser.add_argument('--money_scaling', default =1000, help = 'Scaling factor between money features and actual money.')
-    parser.add_argument('--side_mask', default = '/home/derenlei/MAML/data/mask.npz', help = 'Path to mask of two sides.')
-    parser.add_argument('--action_capacity', default = '/home/derenlei/MAML/data/action_capacity.npy', help = 'Path to action capacity.')
-    parser.add_argument('--id2type', default = '/home/derenlei/MAML/data/action_type.npy', help = 'Path to id2type.')
-    parser.add_argument('--type_capacity', default = '/home/derenlei/MAML/data/type_capacity.npy', help = 'Path to type capacity.')
-    parser.add_argument('--typeid2name', default = '/home/derenlei/MAML/data/type_name.npy', help = 'Path to typeid2name.')
+    parser.add_argument('--side_mask', default = 'data/mask.npz', help = 'Path to mask of two sides.')
+    parser.add_argument('--action_capacity', default = 'data/action_capacity.npy', help = 'Path to action capacity.')
+    parser.add_argument('--id2type', default = 'data/action_type.npy', help = 'Path to id2type.')
+    parser.add_argument('--type_capacity', default = 'data/type_capacity.npy', help = 'Path to type capacity.')
+    parser.add_argument('--typeid2name', default = 'data/type_name.npy', help = 'Path to typeid2name.')
     parser.add_argument('--history_dim', default = 512, help = 'LSTM hidden dimension.')
     parser.add_argument('--history_num_layers', default = 2, help = 'LSTM layer number.')
     parser.add_argument('--ff_dim', default = 512, help = 'MLP dimension.')
@@ -275,7 +273,7 @@ def main():
     parser.add_argument('--seed', default = 4164, help = 'random seed.')
     parser.add_argument('--shared_attention_weight', default = True, help = 'Sharing weight of attention layers or not.')
     parser.add_argument('--different_attention_weight', default = False, help = 'Different weight of attention for history information.')
-    parser.add_argument('--history_encoding', default = None, help = "Encode current player's weapon history. Candidate value: 'avg', 'score_weighted', 'avg.time', 'score_weighted.time')
+    parser.add_argument('--history_encoding', default = None, help = "Encode current player's weapon history. Candidate value: 'avg', 'score_weighted', 'avg.time', 'score_weighted.time'")
     parser.add_argument('--time_decaying', default = 0.99, help = "Decay of player's weighted sum history.")
     parser.add_argument('--gate', type=bool, default = True, help = "Use classifier or not.")
     parser.add_argument('--lstm_mode', default='triple', help="Use single or triple lstm.")
