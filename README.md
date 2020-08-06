@@ -16,7 +16,7 @@ The goal is to assign weapons and equipments to a target player each round. To d
 **Evaluation**: F1 score
 
 
-## Getting the data
+## Preprocessing data
 You can use CS:GO demo files and preprocess the structured data with [this visualizer](https://github.com/Brammz/csgo-demo-visualizer)
 
 ## Method
