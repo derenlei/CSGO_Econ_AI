@@ -1,5 +1,7 @@
+# Learning to Reason in Round-based Games: Multi-task Sequence Generation forPurchasing Decision Making in First-person Shooters
+
 # Meta-learning for CS:GO Economy Strategy
-This is a baselineb model for round-based game strategy learner.
+This is a baseline model for round-based game strategy learner.
 
 This github repository serves as the artifacts repository for the paper "Learning to Reason in Round-based Games: Multi-task Sequence Generation forPurchasing Decision Making in First-person Shooters".
 
