@@ -42,10 +42,7 @@ You can use CS:GO demo files and preprocess the structured data with [this visua
 
 
 ## Model Architecture
-### Iteration 1
-![Iteration 1 Model](./img/Model1.png)
-### Iteration 2
-![Iteration 2 Model](./img/Model2.png)
+![Model](./img/Model.png)
 
 ## Usage
 ### Installation
