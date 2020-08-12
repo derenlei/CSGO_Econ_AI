@@ -254,7 +254,7 @@ def main():
     parser.add_argument('--validate_every', default=500, type=int, help='validate every')
     parser.add_argument('--check_every', default=500, type=int, help='Checkpoint every')
     parser.add_argument('--checkpoint', default='log/checkpoint', help='Path to checkpoint. This works only if starting fresh (i.e., no checkpoints in logdir)')
-    parser.add_argument('--action_embedding', default = 'data/action_embedding.npy', help = 'Path to action embedding.')
+    parser.add_argument('--action_embedding', default = 'data/action_embedding2.npy', help = 'Path to action embedding.')
     parser.add_argument('--action_name', default = 'data/action_name.npy', help = 'Path to action name.')
     parser.add_argument('--action_money', default = 'data/action_money.npy', help = 'Path to action money.')
     parser.add_argument('--money_scaling', default =1000, help = 'Scaling factor between money features and actual money.')
