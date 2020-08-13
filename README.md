@@ -1,8 +1,8 @@
-# Learning to Reason in Round-based Games: Multi-task Sequence Generation for Purchasing Decision Making in First-person Shooters
+# CS_Net
+
+This github repository serves as the artifacts repository for the AIIDE-20 paper [Learning to Reason in Round-based Games: Multi-task Sequence Generation forPurchasing Decision Making in First-person Shooters](https://arxiv.org/abs/2008.05131).
 
 This is a baseline deep RL model for round-based game strategy learner.
-
-This github repository serves as the artifacts repository for the paper "Learning to Reason in Round-based Games: Multi-task Sequence Generation forPurchasing Decision Making in First-person Shooters".
 
 A good explanation of CS:GO economy strategy can be found [here](https://www.metabomb.net/csgo/gameplay-guides/csgo-economy-guide-2).
 
