@@ -76,7 +76,7 @@ To generate prediction on test set, simply change the `--mode` flag in the comma
 CUDA_VISIBLE_DEVICES=$GPU_ID
 python3 run.py --mode='test' --history_encoding='score_weighted' --statedir=$MOVEL_SAVE_PATH
 ```
-We provide the checkpoint of our best model. Download it at [Google Drive](https://drive.google.com/drive/folders/1btZdmiWQssbKvRzfoRDpExtpBTnnSsXl?usp=sharing) and put it in `log/checkpoint/iteration3-score-weight` folder. To test it, run the following command:
+We provide the checkpoint of our best model. Download it at [Google Drive](https://drive.google.com/drive/folders/1btZdmiWQssbKvRzfoRDpExtpBTnnSsXl?usp=sharing) and put it in `log/checkpoint/iteration3-score-weighted` folder. To test it, run the following command:
 ```
 CUDA_VISIBLE_DEVICES=$GPU_ID
 python3 run.py --statedir='iteration3-score-weighted' --mode='test' --lstm_mode='triple' --history_encoding='score_weighted'
