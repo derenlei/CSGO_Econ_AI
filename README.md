@@ -31,7 +31,7 @@ You can use CS:GO demo files and preprocess the structured data with [this visua
 **Embeddings** are generated using self-supervised learning. Similar to word2vec, the action sequence is sorted in a certain manner (e.g. the player have to buy pistols first, then assault rifles, grenades, equipment). We predict the action before and after every action. Here's a t-SNE visualization:
 
 <p align="center">
-  <img width="50%" height="50%" src="https://github.com/derenlei/MAML/blob/master/img/t_SNE.png">
+  <img width="60%" height="60%" src="https://github.com/derenlei/MAML/blob/master/img/t_SNE.png">
 </p>
 
 **Meta-learning algorithm**: Reptile
