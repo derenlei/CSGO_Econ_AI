@@ -1,20 +1,38 @@
-# CS_Net
+# CS:GO Round-based Economy Strategy AI
 
-This github repository serves as the artifacts repository for the AIIDE-20 paper [Learning to Reason in Round-based Games: Multi-task Sequence Generation forPurchasing Decision Making in First-person Shooters](https://arxiv.org/abs/2008.05131).
+<strong> Learning to Reason in Round-based Games: Multi-task Sequence Generation for Purchasing Decision Making in First-person Shooters (AIIDE 2020) </strong>
 
-This is a baseline deep RL model for round-based game strategy learner.
-
-A good explanation of CS:GO economy strategy can be found [here](https://www.metabomb.net/csgo/gameplay-guides/csgo-economy-guide-2).
+This github repository serves as the artifacts repository for our AIIDE-20 paper [Learning to Reason in Round-based Games: Multi-task Sequence Generation forPurchasing Decision Making in First-person Shooters](https://arxiv.org/abs/2008.05131). This is a baseline deep RL model for round-based game strategy learner (CS:GO). If you find our dataset, paper or code useful, please cite our paper:
+```
+@inproceedings{zeng2020learning,
+  title={Learning to Reason in Round-based Games: Multi-task Sequence Generation for Purchasing Decision Making in First-person Shooters},
+  author={Yilei Zeng and Deren Lei and Beichen Li and Gangrong Jiang and Emilio Ferrara and Michael Zyda},
+  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence and Interactive Digital Entertainment},
+  year={2020}
+}
+```
 
 ## Quick Links
+- [Introduction](#Introduction)
 - [Task](#Task)
 - [Getting the Data](#Getting-the-data)
 - [Method](#Method)
 - [Model Architecture](#Model-Architecture)
 - [Usage](#Usage)
 
+## Introduction
+Consider this round-based game scenario: A professional Dota2 player plays five games in total but already lost the first two games. How would he/she play the third one? Will he/she choose an aggressive strategy and take more risks? Such strategy decisions requires a good understanding of how previous rounds are played: Is the opponents really good? How about the teammates? Can he/she carry the team? The determined strategy is crucial for game AI as its actions are conditioned on the general strategy.
+
+Such problem is natrually different from building conventional game AI that focused on per game reasoning. In this work we perticularly interested in studying this round-based challenge. Specifically, using our released CS:GO weapon purchasing per round dataset. As the purchased weapons each round indicates what economy strategy the player choose to use.
+
+A good explanation of CS:GO economy strategy can be found [here](https://www.metabomb.net/csgo/gameplay-guides/csgo-economy-guide-2). To put it simple, the money CS:GO player make is based on how each round ended. The money can be used to buy better weapons which can heavily impact how future round goes. You lost your weapon if you die. You can pick up weapon from dead body. You can save money for future rounds. Can AI learn ideal strategies from professional players?
+
+<p align="center">
+  <img width="70%" height="70%" src="https://github.com/derenlei/MAML/blob/master/img/eco.jpg">
+</p>
+
 ## Task
-The goal is to assign weapons and equipment to a target player each round. To deal with the intrinsic attributes and preferences of each team and each player, the problem is defined as few-shot learning. Each game is identified as a task. For each task, the model can observe k rounds (not necessarily need to be consecutive) as the support set. Predict player's weapon purchasing in the rest rounds. We formulize it as a sequence generation problem.
+Details can be found in our [paper](https://arxiv.org/abs/2008.05131). The goal is to assign weapons and equipment to a target player each round. To deal with the intrinsic attributes and preferences of each team and each player, the problem is defined as few-shot learning. Each game is identified as a task. For each task, the model can observe k rounds (not necessarily need to be consecutive) as the support set. Predict player's weapon purchasing in the rest rounds. We formulize it as a sequence generation problem.
 
 **Input**: player's current weapons and equipment, player's current money, other teammates' purchasing decision, opponent's previous round weapons and equipment, all players' performance score, round score.
 
@@ -28,7 +46,7 @@ You can use CS:GO demo files and preprocess the structured data with [this visua
 
 ## Method
 
-**Embeddings** are generated using self-supervised learning. Similar to word2vec, the action sequence is sorted in a certain manner (e.g. the player have to buy pistols first, then assault rifles, grenades, equipment). We predict the action before and after every action. Here's a t-SNE visualization:
+**Action Embeddings** are generated using self-supervised learning. Similar to word2vec, the action sequence is sorted in a certain manner (e.g. the player have to buy pistols first, then assault rifles, grenades, equipment). We predict the action before and after every action. Here's a t-SNE visualization:
 
 <p align="center">
   <img width="60%" height="60%" src="https://github.com/derenlei/MAML/blob/master/img/t_SNE.png">
